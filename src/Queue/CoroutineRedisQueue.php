@@ -169,7 +169,7 @@ class CoroutineRedisQueue extends Component
                 if ($maxJobs > 0) {
                     break; // bounded run: queue is empty, stop here
                 }
-                \Swoole\Coroutine::sleep(0.05);
+                $this->idle(0.05);
                 continue;
             }
 
@@ -187,6 +187,24 @@ class CoroutineRedisQueue extends Component
         }
 
         return $processed;
+    }
+
+    /**
+     * Suspends the current execution context for the given number of seconds.
+     *
+     * Inside a coroutine this yields to the scheduler. The console worker
+     * (`php yii queue/serve`) runs outside a coroutine, where
+     * [[\Swoole\Coroutine::sleep()]] throws `Swoole\Error`; it therefore
+     * falls back to a blocking usleep().
+     */
+    private function idle(float $seconds): void
+    {
+        if (\Swoole\Coroutine::getCid() === -1) {
+            usleep((int) round($seconds * 1_000_000));
+            return;
+        }
+
+        \Swoole\Coroutine::sleep($seconds);
     }
 
     /**

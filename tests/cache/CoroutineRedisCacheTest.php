@@ -41,6 +41,28 @@ class CoroutineRedisCacheTest extends TestCase
     public function testSetGet(): void
     {
         $this->runInCoroutine(function (): void {
+            // Type round-trips the official CacheTest scope covers - the
+            // serializer must survive every one of them.
+            $cases = [
+                'int' => 42,
+                'float' => 3.14159,
+                'string' => 'hello 世界',
+                'bool-false' => false,
+                'null' => null,
+                'array' => ['a' => 1, 'nested' => ['deep' => true]],
+                'object' => (object) ['prop' => 'v'],
+            ];
+            foreach ($cases as $key => $value) {
+                Yii::$app->cache->set("type-{$key}", $value);
+                // Objects deserialize into new instances - equality, not
+                // identity, is the official CacheTest semantic for them.
+                if (is_object($value)) {
+                    $this->assertEquals($value, Yii::$app->cache->get("type-{$key}"), "type round-trip failed: {$key}");
+                } else {
+                    $this->assertSame($value, Yii::$app->cache->get("type-{$key}"), "type round-trip failed: {$key}");
+                }
+            }
+
             Yii::$app->cache->set('test-key', ['a' => 1, 'b' => 'two']);
             $this->assertSame(['a' => 1, 'b' => 'two'], Yii::$app->cache->get('test-key'));
             Yii::$app->cache->delete('test-key');
@@ -56,6 +78,21 @@ class CoroutineRedisCacheTest extends TestCase
             $this->assertFalse(Yii::$app->cache->add('test-add', 'second'));
             $this->assertSame('first', Yii::$app->cache->get('test-add'));
             Yii::$app->cache->delete('test-add');
+        });
+    }
+
+    public function testAddWithDurationSetsExpiration(): void
+    {
+        $this->runInCoroutine(function (): void {
+            Yii::$app->cache->delete('test-add-exp');
+            $this->assertTrue(Yii::$app->cache->add('test-add-exp', 'value', 60));
+            $this->assertSame('value', Yii::$app->cache->get('test-add-exp'));
+
+            $ttl = $this->redis->ttl(Yii::$app->cache->buildKey('test-add-exp'));
+            $this->assertGreaterThan(0, $ttl, 'add() with a duration must set a TTL');
+            $this->assertLessThanOrEqual(60, $ttl);
+
+            Yii::$app->cache->delete('test-add-exp');
         });
     }
 

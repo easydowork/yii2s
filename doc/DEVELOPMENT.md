@@ -1,8 +1,61 @@
 # Yii2S Swoole 加速扩展包 — 开发文档
 
 > 项目：`yii2s/yii2-swoole`
-> 运行时：Swoole 6.2.2（swoole-cli 内嵌 PHP 8.4.14，Windows）
-> 状态：核心功能已完成并通过真实环境回归测试（2026-11-01）
+> 运行时：Swoole 6.2.2（swoole-cli 内嵌 PHP 8.4.14，Windows 开发 / Linux 生产目标）
+> 状态：核心功能完成，68 tests / 237 assertions 双运行时全绿，phpstan L5 + cs-fixer 零错误，
+> 真实环境端到端验证（含压测）通过（2026-11-02）
+
+---
+
+## 〇、快速导览（写给代码审查者）
+
+**这个包解决什么问题**：Yii2 是为 FPM 设计的（每请求一个进程、用完即弃），
+本包让它以常驻内存协程模式运行在 Swoole 6 上——业务代码不改，只换配置里的组件类。
+
+**一句话架构**：常驻 Yii2 Application + 每请求协程 + 请求级组件每请求重建 + 资源连接池化。
+状态隔离做在调度层（`RequestDispatcher`/`RequestStateManager`），上层 Yii2 组件尽量不动——
+这是 CSRF、BasicAuth、事务、Redis MULTI 无需适配即可用的原因。
+
+### 代码结构（src/ 每个目录的职责）
+
+| 路径 | 职责 | 关键类 |
+|---|---|---|
+| `Server/` | 服务器生命周期与请求分发 | `HttpServer`（启动/停机/pid/信号/标志文件）、`RequestDispatcher`（静态文件→指标端点→Yii）、`StaticFileServer`、`PidFile` |
+| `Runtime/` | Swoole↔Yii2 请求桥接 | `CoroutineRequest/Response`（超全局隔离）、`RequestStateManager`（每请求重建+资源回收+池 sweep）、`SwooleResponseSender` |
+| `Pools/` | 通用连接池 | `ConnectionPool`（Channel 实现，含泄漏 sweep）、`PoolMetricsCollector` |
+| `Db/` `Redis/` | 池化组件 | `CoroutineDbConnection/CoroutineRedisConnection`（协程粘性借用） |
+| `Cache/` `Session/` | 池化组件的上层封装 | `CoroutineRedisCache`、`CoroutineSession` |
+| `Queue/` | Redis 队列 | `CoroutineRedisQueue`（ZSET 延迟/重试/死信） |
+| `Log/` | 常驻进程日志 | `CoroutineFileTarget`（缓冲批量写） |
+| `Console/` `Bootstrap` | 命令注册 | `swoole/start|stop|status|reload`、`queue/serve` |
+| `Coroutine/` | 协程上下文工具 | `CoroutineContext` |
+
+### 关键设计决策（含理由）
+
+| 决策 | 理由 |
+|---|---|
+| 静态文件用 PHP 层 `StaticFileServer` 而非 Swoole 原生 handler | **实测协程 `Http\Server` 完全忽略 `enable_static_handler`**（连已存在的文件都进 handle 回调）；生产推荐 nginx 直出，包内方案仅作开发便利（`documentRoot` 默认关闭） |
+| 多进程采用「多实例 + SO_REUSEPORT」而非进程内 fork | fork 需要进程级状态隔离重验证，Windows 上无法测试不可验证的代码；多实例已启用 reuse_port（server factory 第 4 参数），Linux 上 supervisor `numprocs=N` 即可利用多核，且更贴合 12-factor |
+| Queue 独立实现而非兼容 `yii\queue\Queue` 接口 | 避免引入 yiisoft/yii2-queue 依赖；接口兼容列为后续增强 |
+| 借出登记用普通数组而非 WeakMap | **msys2 swoole-cli 平台 bug：子协程对 WeakMap 的写入对其他协程不可见**（独立脚本实锤），且 defer+WeakMap 方案会直接打崩进程 |
+| 泄漏回收用 `sweep()`（每请求结束）而非 `Coroutine::defer` | defer 阶段做 channel IO / 新建协程在 Windows 构建上不可靠（实测崩溃）；sweep 由活跃请求协程同步执行，确定性回收 |
+| `Coroutine\run` 内 server 跑在专用子协程 | shutdown() 从其他协程调用时，跑在根协程的 start() 不会被唤醒（实测死锁） |
+| respawn 的命令行前置 `PHP_BINARY` | pid 文件存的是无解释器的脚本调用（如 `example/yii ...`），入口脚本无 shebang，直接 exec 在 Linux/Windows 上都会失败；修复后 `swoole/reload` 在 Linux 实测真实 respawn 成功（pid 423→441 无缝换血） |
+| console 命令的 `--host/--port` 用 controller 公共属性而非 action 参数 | Yii2 匿名选项只赋值 controller 公共属性，不映射 action 方法参数；不声明进 `options()` 白名单会直接报 Unknown option |
+| watcher 用 `Coroutine::sleep` 轮询而非 `Swoole\Timer` | cygwin 构建下 Timer::tick 挂死事件循环；msys2 正常但为兼容两者统一用协程轮询 |
+| 测试全绿但偶发集成失败 | 集成测试用随机端口，偶发端口冲突；重跑即绿，非确定性失败 |
+
+### 验证状态
+
+- **Windows**：msys2（Swoole 6.2.2，主力）+ cygwin（6.1.7，兼容基线）双运行时全量测试；
+  example 全端点、四条服务器命令、压测端到端实测
+- **Linux**：WSL2 Ubuntu 26.04 + 原生 swoole-cli（6.2.2）——全量测试 68/237 全绿、
+  端到端（start/status/reload 真实 respawn/SIGTERM 优雅停机）实测通过、真实基准数据见上节。
+  `scripts/wsl-e2e.sh` 与 `scripts/wsl-bench.sh` 可在任意 Linux 复跑。
+  Windows 侧服务（MySQL/Redis）通过 WSL mirrored 网络模式（`%USERPROFILE%\.wslconfig` 设
+  `networkingMode=mirrored`）共享 localhost，测试配置零修改
+- **CI**：GitHub Actions（Linux + pecl swoole 矩阵）已配置，待仓库推送后首次真实运行
+- **压测**：见「五点五、压测基准」——Linux 纯框架 13706 QPS（p50 7.2ms）
 
 ---
 
@@ -210,7 +263,13 @@ D:\EServer-data\childApp\php\php-8.4\php.exe vendor/phpstan/phpstan/phpstan anal
 18. **phpredis 的 `zRangeByScore` 不接受原始 LIMIT 参数** —— 用 options 数组风格 `['limit' => [0, 1]]`，`executeCommand('ZRANGEBYSCORE', ...)` 直传 6 个参数会炸。
 19. **`Coroutine::sleep(0)` 无效** —— 定时器最小 0.001 秒。
 20. **PowerShell heredoc 会吞掉 `||` 和 `&&`** —— 用 heredoc 写含逻辑运算符的 PHP 代码后必须复查（出现 `a; b` 形式的语法错误即为中招）。
-
+21. **msys2 构建的 WeakMap 跨协程不可见** —— 子协程内对 WeakMap 的写入在其他协程读不到（纯 PHP 独立脚本可复现），跨协程共享状态一律用普通数组（详见 §5.5 的泄漏修复案例）。
+22. **子协程借用池连接是泄漏高危点** —— Yii2 的每次查询都会在当前协程借连接；并行查询子协程借的连接必须由池的 `sweep()` 兜底回收（组件的 `release()` 只能归还当前协程自己的）。
+23. **从 PowerShell 内联调用 WSL 命令是转义地狱** —— 双引号字符串里 `$(...)`、`$var` 会被 PowerShell 展开，`curl` 是 `Invoke-WebRequest` 的别名（报错完全对不上）。**WSL 一律通过脚本文件执行**：PowerShell 写入 `.sh`（ASCII）→ `sed -i 's/\r$//'` 去 CRLF → `wsl -- bash script.sh`，输出重定向到文件再读，避免管道截断。
+24. **WSL mirrored 网络模式** —— Windows 侧服务（MySQL/Redis 只监听 127.0.0.1）可被 WSL 以 `127.0.0.1` 直连，无需改服务配置；需要 `%USERPROFILE%\.wslconfig` 设 `networkingMode=mirrored` + `wsl --shutdown` 重启（WSL ≥ 2.0 / Win11）。
+25. **phpredis `SET` 的过期时间必须用关联键** —— `executeCommand('SET', [$k, $v, ['NX', 'EX', 60]])` 的数字索引 `EX` 被静默忽略（TTL=-1 永不过期）；必须写 `['NX', 'EX' => 60]`。原测试只覆盖 `$duration=0` 分支所以漏网（外部评审 P0-2 发现并修复，附 TTL 区间回归测试）。
+26. **协程外禁止调用 `Coroutine::sleep`**（抛 `Swoole\Error`）——控制台命令运行在主线程（`getCid() === -1`）；需要等待时用「协程内 sleep / 协程外 `usleep`」双路 helper（见 `CoroutineRedisQueue::idle()`）。`queue/serve` 空队列必崩即此因（外部评审 P0-1 发现并修复）。
+27. **外部评审（SECURITY-REVIEW.md）另修复**：Cookie 丢失 `SameSite`（Swoole `cookie()` 第 8 参未转发）、`getIsSecureConnection` 硬编码信任 `X-Forwarded-Proto`（已对齐 `secureProtocolHeaders` 配置）、静态文件可泄露 `.php/.env` 等敏感文件（可执行/敏感扩展黑名单 + dotfile 拦截）、日志缓冲并发竞态（Channel 互斥锁）。**注意**：该锁的懒初始化必须留在协程内——挪到 `init()` 会在协程外 `push` Channel 令牌静默失败，首个 `lock()` 永久阻塞（整个测试套件挂死，已实测）。
 ---
 
 ## 三点五、工程化（已对齐官方规范）
@@ -375,12 +434,26 @@ swoole-cli scripts/bench.php --path=/demo/db --concurrency=100 --duration=5
 
 ### 结果（5s 采样，零 5xx）
 
+**Windows**（msys2 swoole-cli）：
+
 | 端点 | 并发 | QPS | p50 | p99 | 说明 |
 |---|---|---|---|---|---|
 | `/`（纯框架） | 100 | 8132 | 9.7ms | 19.9ms | 路由+JSON 序列化 |
 | `/demo/db`（2 条 SQL） | 100 | 2384 | 33.4ms | 43.7ms | 连接池借还 |
 | `/demo/redis`（3 命令） | 100 | 2851 | 27.9ms | 33.5ms | 池化 Redis |
 | `/demo/concurrent`（10 并行 SQL） | 5~10 | ~8 | 128ms | 3s* | 见下方容量分析 |
+
+**Linux**（WSL2 Ubuntu 26.04 + 原生 swoole-cli，同一负载生成器）：
+
+| 端点 | 并发 | QPS | p50 | p95 | p99 |
+|---|---|---|---|---|---|
+| `/`（纯框架） | 100 | **13706** | 7.2ms | 9.6ms | 11.2ms |
+| `/demo/db`（2 条 SQL） | 100 | **2829** | 35.3ms | 39.0ms | 42.0ms |
+| `/demo/redis`（3 命令） | 100 | **5823** | — | — | — |
+
+Linux 纯框架吞吐高出 69%、Redis 高 104%（原生 epoll + 无 Windows 层中转），
+**"生产环境用 Linux"得到数据支撑**。Linux 上压测后 `/__pool` 显示 db 池
+total_borrowed=14144、total_timeouts=0、active=0/idle=20——**零泄漏**。
 
 \* p99 3s = borrow 等待超时（waitTimeout=3s）：每请求 10 个子协程各借 1 连接，
 并发 10 时需要 100 连接当量，远超池容量 20，部分查询排队到超时（demo 把超时吞成 error payload 返回 200）。

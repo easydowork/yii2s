@@ -10,6 +10,7 @@ declare(strict_types=1);
 
 namespace yii2stest\runtime;
 
+use Yii;
 use Yii2S\Swoole\Runtime\CoroutineRequest;
 use yii\web\Request;
 use yii2stest\TestCase;
@@ -115,9 +116,28 @@ class CoroutineRequestTest extends TestCase
         $this->assertSame('https://secure.example.com', $request->getHostInfo());
     }
 
+    public function testSecureConnectionHonorsSecureProtocolHeadersConfig(): void
+    {
+        $request = new CoroutineRequest([
+            'cookieValidationKey' => 'test',
+            'secureProtocolHeaders' => [], // disable proxy-header trust
+        ]);
+        $request->setSwooleRequest($this->createSwooleRequest([
+            'header' => ['x-forwarded-proto' => 'https', 'host' => 'plain.example.com'],
+            'server' => ['request_uri' => '/'],
+        ]));
+
+        $this->assertFalse($request->getIsSecureConnection());
+        $this->assertSame('http://plain.example.com', $request->getHostInfo());
+    }
+
     public function testCookies(): void
     {
-        $request = new CoroutineRequest(['cookieValidationKey' => 'test']);
+        // Raw semantics (validation disabled): every cookie passes through.
+        $request = new CoroutineRequest([
+            'cookieValidationKey' => 'test',
+            'enableCookieValidation' => false,
+        ]);
         $request->setSwooleRequest($this->createSwooleRequest([
             'cookie' => ['PHPSESSID' => 'abc123', 'theme' => 'dark'],
             'server' => ['request_uri' => '/'],
@@ -127,6 +147,36 @@ class CoroutineRequestTest extends TestCase
         $this->assertSame('abc123', $cookies->getValue('PHPSESSID'));
         $this->assertSame('dark', $cookies->getValue('theme'));
         $this->assertNull($cookies->getValue('missing'));
+    }
+
+    public function testTamperedCookieIsDropped(): void
+    {
+        // Official loadCookies() semantics with validation enabled: a cookie
+        // whose signature does not match the validation key must be dropped
+        // (this is what protects the auto-login identity cookie).
+        $this->mockWebApplication([
+            'components' => [
+                'request' => [
+                    'class' => CoroutineRequest::class,
+                    'cookieValidationKey' => 'tamper-test-key',
+                    'enableCsrfValidation' => false,
+                ],
+            ],
+        ]);
+        $request = new CoroutineRequest(['cookieValidationKey' => 'tamper-test-key']);
+        $request->setSwooleRequest($this->createSwooleRequest([
+            'cookie' => [
+                'valid' => Yii::$app->security->hashData(serialize(['valid', 'good']), 'tamper-test-key'),
+                'tampered' => '9999deadbeef:' . serialize(['tampered', 'evil']),
+                'unsigned' => 'plain-value',
+            ],
+            'server' => ['request_uri' => '/'],
+        ]));
+
+        $cookies = $request->getCookies();
+        $this->assertSame('good', $cookies->getValue('valid'), 'validly signed cookie must pass');
+        $this->assertNull($cookies->getValue('tampered'), 'tampered signature must be dropped');
+        $this->assertNull($cookies->getValue('unsigned'), 'unsigned value must not pass validation');
     }
 
     public function testExtendsYiiWebRequest(): void

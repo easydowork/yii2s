@@ -55,8 +55,10 @@ $warmup = max(0.0, (float) ($options['warmup'] ?? 1.0));
 
                     if (!$ok || $client->statusCode === 0 || $client->errCode !== 0) {
                         $errors++;
-                        // Reconnect on error.
+                        // Reconnect on error; back off so a burst of failures
+                        // cannot starve the event loop (or the server).
                         $client->close();
+                        \Swoole\Coroutine::sleep(0.01);
                         $client = new \Swoole\Coroutine\Http\Client($host, $port);
                         continue;
                     }

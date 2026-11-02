@@ -86,16 +86,23 @@ class HttpServer extends Component
         parent::init();
 
         if (empty($this->dispatcher)) {
-            throw new InvalidConfigException('Property "dispatcher" must be set.');
+            // Sensible default for web applications: the standard config
+            // location next to the entry script. Console-only applications
+            // without that file keep getting the explicit error.
+            $webConfig = Yii::getAlias('@app/config/web.php');
+            if (is_file($webConfig)) {
+                $this->dispatcher = new RequestDispatcher($webConfig);
+            } else {
+                throw new InvalidConfigException(
+                    'Property "dispatcher" must be set (no default app config found at @app/config/web.php).'
+                );
+            }
         }
         $this->dispatcher = Instance::ensure($this->dispatcher, RequestDispatcherInterface::class);
 
-        if (is_string($this->pidFile) && str_starts_with($this->pidFile, '@')) {
-            $this->pidFile = Yii::getAlias($this->pidFile);
-        }
-        if (is_string($this->documentRoot) && str_starts_with($this->documentRoot, '@')) {
-            $this->documentRoot = Yii::getAlias($this->documentRoot);
-        }
+        $this->pidFile = $this->resolveAlias($this->pidFile);
+        $this->documentRoot = $this->resolveAlias($this->documentRoot);
+        $this->stopFlagFile = $this->resolveAlias($this->stopFlagFile);
 
         // The coroutine Http\Server ignores Swoole's native static handler,
         // so static files are served at the PHP level via the dispatcher.
@@ -105,15 +112,24 @@ class HttpServer extends Component
         ) {
             $this->dispatcher->staticRoot = $this->documentRoot;
         }
-        if (is_string($this->stopFlagFile) && str_starts_with($this->stopFlagFile, '@')) {
-            $this->stopFlagFile = Yii::getAlias($this->stopFlagFile);
-        }
 
         if ($this->serverFactory === null) {
             $this->serverFactory = static function (string $host, int $port): SwooleCoroutineHttpServer {
                 return new SwooleCoroutineHttpServer($host, $port, false, true);
             };
         }
+    }
+
+    /**
+     * Resolves a Yii path alias, passing through non-string and relative values.
+     */
+    private function resolveAlias(mixed $path): mixed
+    {
+        if (is_string($path) && str_starts_with($path, '@')) {
+            return Yii::getAlias($path);
+        }
+
+        return $path;
     }
 
     /**
@@ -170,9 +186,8 @@ class HttpServer extends Component
         $this->trigger(self::EVENT_BEFORE_START);
 
         Coroutine::set([
-            'hook_flags' => $this->hookFlags & ~SWOOLE_HOOK_FILE,
+            'hook_flags' => $this->hookFlags,
             'max_coroutine' => $this->settings['max_coroutine'] ?? 100000,
-            'log_level' => $this->settings['log_level'] ?? SWOOLE_LOG_WARNING,
         ]);
 
         $this->lastStopAction = null;
@@ -264,29 +279,28 @@ class HttpServer extends Component
         return $this->isRunning;
     }
 
+    /**
+     * Applies the configured Swoole settings. The coroutine Http\Server
+     * accepts only a subset of the Swoole settings (e.g. backlog,
+     * open_tcp_nodelay, package_max_length for large request bodies);
+     * unknown keys are ignored by Swoole with a warning. Notably
+     * `enable_static_handler` has no effect here - static files are served
+     * by the dispatcher at the PHP level (see [[documentRoot]]).
+     */
     private function applySettings(): void
     {
-        $settings = $this->buildSettings();
-        if ($settings !== []) {
-            $this->server->set($settings);
-        }
-    }
+        // Unlike the stock Swoole\Http\Server, Coroutine\Http\Server defaults
+        // `http_parse_files` to *false* (swoole_http.h) - multipart uploads
+        // would silently produce an empty $request->files. Also, whether the
+        // other parsers default on varies across builds. Pin them explicitly;
+        // user-configured keys win over these defaults.
+        $this->settings += [
+            'http_parse_cookie' => true,
+            'http_parse_post' => true,
+            'http_parse_files' => true,
+        ];
 
-    /**
-     * Effective Swoole server settings.
-     *
-     * Note: static files are served by [[RequestDispatcher]] at the PHP level
-     * ([[documentRoot]]), because the coroutine Http\Server ignores Swoole's
-     * native `enable_static_handler`.
-     *
-     * @return array<string, mixed>
-     */
-    public function buildSettings(): array
-    {
-        $supported = ['backlog', 'open_tcp_nodelay'];
-        $settings = array_intersect_key($this->settings, array_flip($supported));
-
-        return $settings;
+        $this->server->set($this->settings);
     }
 
     private function registerSignalHandlers(SwooleCoroutineHttpServer $server): void
@@ -299,7 +313,8 @@ class HttpServer extends Component
             }
         } catch (\Throwable $e) {
             // Signal handling is not available on every platform; the server
-            // still works, it just cannot shut down gracefully.
+            // still works, it just cannot shut down gracefully. On Windows the
+            // stop flag watcher provides the graceful path instead.
         }
     }
 

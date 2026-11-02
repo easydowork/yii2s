@@ -91,6 +91,49 @@ class HttpServerStaticTest extends TestCase
         });
     }
 
+    public function testExecutableAndHiddenFilesAreNotServed(): void
+    {
+        file_put_contents($this->docRoot . '/secret.php', '<?php echo "leak";');
+        file_put_contents($this->docRoot . '/.env', "SECRET=1\n");
+
+        try {
+            $this->runInCoroutine(function (): void {
+                $port = random_int(26000, 30000);
+                $server = Yii::createObject([
+                    'class' => HttpServer::class,
+                    'host' => '127.0.0.1',
+                    'port' => $port,
+                    'documentRoot' => $this->docRoot,
+                    'enableSignalHandling' => false,
+                    'dispatcher' => new RequestDispatcher(__DIR__ . '/../data/app.php'),
+                ]);
+
+                Coroutine::create(function () use ($server): void {
+                    try {
+                        $server->start();
+                    } catch (\Throwable) {
+                    }
+                });
+
+                try {
+                    $this->waitForServer($port);
+
+                    $php = $this->request($port, '/secret.php');
+                    $this->assertSame(404, $php['status'], 'PHP source must never be served as a static file');
+
+                    $env = $this->request($port, '/.env');
+                    $this->assertSame(404, $env['status'], 'hidden files must never be served as a static file');
+                } finally {
+                    $server->stop();
+                    $this->waitFor(fn (): bool => !$server->isRunning());
+                }
+            });
+        } finally {
+            @unlink($this->docRoot . '/secret.php');
+            @unlink($this->docRoot . '/.env');
+        }
+    }
+
     private function request(int $port, string $path): array
     {
         $client = new Client('127.0.0.1', $port);

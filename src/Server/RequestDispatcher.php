@@ -83,15 +83,6 @@ class RequestDispatcher implements RequestDispatcherInterface
     }
 
     /**
-     * Enables PHP-level static file serving from the given document root.
-     */
-    public function setStaticRoot(?string $root): void
-    {
-        $this->staticRoot = $root;
-        $this->staticFileServer = null;
-    }
-
-    /**
      * Serves the connection pool metrics debug endpoint when enabled. Runs
      * before the request enters the Yii lifecycle: it only reads pool state
      * and never borrows a connection.

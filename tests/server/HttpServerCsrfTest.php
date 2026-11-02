@@ -58,6 +58,12 @@ class HttpServerCsrfTest extends TestCase
                 if (!is_array($cookies)) {
                     $cookies = [$cookies];
                 }
+                $cookieStr = implode("\n", array_map(static fn ($c) => (string) $c, $cookies));
+                $this->assertStringContainsStringIgnoringCase(
+                    'samesite',
+                    $cookieStr,
+                    'the CSRF cookie must carry the SameSite attribute'
+                );
                 $client->close();
 
                 // 2. POST without the token: rejected with 400 (BadRequestHttpException).

@@ -68,6 +68,13 @@ class RequestStateManager
         self::$activeRequests--;
         $definitions = $app->getComponents(true);
 
+        // Drop the per-request $_FILES population and UploadedFile's static
+        // cache (see CoroutineRequest::setSwooleRequest()).
+        $_FILES = [];
+        if (class_exists(\yii\web\UploadedFile::class)) {
+            \yii\web\UploadedFile::reset();
+        }
+
         foreach (self::REQUEST_SCOPED_COMPONENTS as $id) {
             if (isset($definitions[$id])) {
                 $app->set($id, $definitions[$id]);

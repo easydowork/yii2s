@@ -40,4 +40,31 @@ class TestSiteController extends Controller
             'name' => Yii::$app->request->csrfParam,
         ];
     }
+
+    public function actionUpload(): array
+    {
+        // Reports multipart uploads through the standard Yii2 API
+        // (UploadedFile consumes CoroutineRequest::getFileParams()).
+        $report = static function (string $fieldName): array {
+            $reported = [];
+            foreach (\yii\web\UploadedFile::getInstancesByName($fieldName) as $file) {
+                $reported[] = [
+                    'name' => $file->name,
+                    'size' => $file->size,
+                    'error' => $file->error,
+                    'contentSha1' => $file->error === \UPLOAD_ERR_OK
+                        ? sha1((string) file_get_contents((string) $file->tempName))
+                        : null,
+                ];
+            }
+
+            return $reported;
+        };
+
+        return [
+            'upload' => $report('upload'),
+            'files' => $report('files'),
+            'post' => Yii::$app->request->getBodyParams(),
+        ];
+    }
 }

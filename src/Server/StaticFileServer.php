@@ -48,6 +48,39 @@ class StaticFileServer
         'zip' => 'application/zip',
     ];
 
+    /**
+     * Extensions that must never be served as raw files: server-executable
+     * scripts and sensitive files that could leak source code or secrets if a
+     * document root accidentally contains them.
+     */
+    private const BLOCKED_EXTENSIONS = [
+        'php' => true,
+        'php3' => true,
+        'php4' => true,
+        'php5' => true,
+        'php7' => true,
+        'php8' => true,
+        'phtml' => true,
+        'phar' => true,
+        'phps' => true,
+        'pht' => true,
+        'inc' => true,
+        'cgi' => true,
+        'pl' => true,
+        'py' => true,
+        'rb' => true,
+        'sh' => true,
+        'bat' => true,
+        'asp' => true,
+        'aspx' => true,
+        'jsp' => true,
+        'htaccess' => true,
+        'env' => true,
+        'sql' => true,
+        'ini' => true,
+        'log' => true,
+    ];
+
     /** @var int how long browsers may cache static assets (seconds) */
     public int $maxAge = 86400;
 
@@ -78,6 +111,14 @@ class StaticFileServer
         // Only serve paths that look like asset files (with an extension).
         $extension = strtolower(pathinfo($path, PATHINFO_EXTENSION));
         if ($extension === '') {
+            return false;
+        }
+
+        // Never serve hidden files (dotfiles) or executable/sensitive files.
+        if (str_starts_with(pathinfo($path, PATHINFO_BASENAME), '.')) {
+            return false;
+        }
+        if (isset(self::BLOCKED_EXTENSIONS[$extension])) {
             return false;
         }
 

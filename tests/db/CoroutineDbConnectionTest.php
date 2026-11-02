@@ -176,4 +176,20 @@ class CoroutineDbConnectionTest extends DatabaseTestCase
             $this->assertGreaterThan(0, (int) $rows);
         });
     }
+
+    public function testNonCoroutineAccessUsesDetachedConnection(): void
+    {
+        // Console commands (queue/serve handlers, migrations) run outside a
+        // coroutine. The component must bypass the pool via a detached
+        // connection and must not hang or touch pool counters.
+        $db = $this->getConnection(false, false);
+
+        $first = $db->createCommand('SELECT `name` FROM `customer` ORDER BY `id` LIMIT 1')->queryScalar();
+        $second = $db->createCommand('SELECT `name` FROM `customer` ORDER BY `id` LIMIT 1')->queryScalar();
+        $this->assertSame('alice', $first);
+        $this->assertSame('alice', $second, 'detached connection must be reused across non-coroutine calls');
+
+        $metrics = $db->getPool()->getMetrics();
+        $this->assertSame(0, $metrics['total_borrowed'], 'pool must be untouched outside coroutines');
+    }
 }

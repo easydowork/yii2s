@@ -11,6 +11,7 @@ declare(strict_types=1);
 namespace Yii2S\Swoole\Runtime;
 
 use Swoole\Http\Response as SwooleResponse;
+use Yii;
 use yii\web\HeaderCollection;
 use yii\web\Response;
 
@@ -49,21 +50,50 @@ class SwooleResponseSender
     private function sendCookies(SwooleResponse $swooleResponse, \yii\web\CookieCollection $cookies): void
     {
         foreach ($cookies as $cookie) {
-            $expire = $cookie->expire;
-            if ($expire instanceof \DateInterval) {
-                // yii\web\Cookie allows \DateInterval values; convert to timestamp.
-                $expire = (new \DateTimeImmutable())->add($expire)->getTimestamp();
+            $expire = $this->normalizeExpire($cookie->expire);
+
+            $value = (string) $cookie->value;
+            // Official `Response::sendCookies()` semantics: signed cookies get
+            // hashed (name+value through the request's validation key). URL
+            // encoding is Swoole's cookie() job - it encodes by itself, and a
+            // manual encoding here would double-encode the signature.
+            $request = Yii::$app->getRequest();
+            if ($request->enableCookieValidation && $cookie->value !== null) {
+                $value = Yii::$app->security->hashData(
+                    serialize([$cookie->name, $value]),
+                    (string) $request->cookieValidationKey
+                );
             }
 
             $swooleResponse->cookie(
                 $cookie->name,
-                (string) $cookie->value,
+                $value,
                 $expire,
-                $cookie->path,
-                $cookie->domain,
-                $cookie->secure,
-                $cookie->httpOnly
+                (string) $cookie->path,
+                (string) $cookie->domain,
+                (bool) $cookie->secure,
+                (bool) $cookie->httpOnly,
+                (string) $cookie->sameSite
             );
         }
+    }
+
+    /**
+     * Converts the various [[\yii\web\Cookie::$expire]] representations into a
+     * Unix timestamp understood by the Swoole response.
+     */
+    private function normalizeExpire(mixed $expire): int
+    {
+        if ($expire instanceof \DateTimeInterface) {
+            return $expire->getTimestamp();
+        }
+        if ($expire instanceof \DateInterval) {
+            return (new \DateTimeImmutable())->add($expire)->getTimestamp();
+        }
+        if (is_string($expire) && !is_numeric($expire)) {
+            return (int) strtotime($expire);
+        }
+
+        return (int) $expire;
     }
 }

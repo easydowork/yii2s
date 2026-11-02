@@ -48,6 +48,44 @@ class CoroutineFileTargetTest extends TestCase
         return [$text, Logger::LEVEL_INFO, 'test.category', microtime(true), []];
     }
 
+    public function testRotationKeepsFileSizeBounded(): void
+    {
+        // Inherits yii\log\FileTarget's rotation; pin the semantics: when the
+        // file exceeds maxFileSize the log rotates to .1/.2/... keeping at
+        // most maxLogFiles history files. Long-running production servers
+        // depend on this - an unbounded app.log is an outage.
+        $target = new CoroutineFileTarget([
+            'logFile' => $this->logFile,
+            'maxBufferMessages' => 1,
+            'exportInterval' => PHP_INT_MAX,
+            'maxFileSize' => 1, // 1 KB - rotate almost immediately
+            'maxLogFiles' => 2,
+        ]);
+
+        $rounds = 40;
+        for ($i = 0; $i < $rounds; $i++) {
+            $target->collect([$this->message('round-' . $i . ' ' . str_repeat('x', 120))], true);
+        }
+
+        $this->assertFileExists($this->logFile);
+        $this->assertLessThan(
+            200 * 1024,
+            (int) filesize($this->logFile),
+            'active log file must stay bounded by rotation'
+        );
+        $this->assertFileExists($this->logFile . '.1', 'at least one rotated file must exist');
+        $this->assertFileDoesNotExist($this->logFile . '.3', 'history beyond maxLogFiles must be dropped');
+
+        // Official rotation semantics: messages older than the history window
+        // are dropped; everything inside the window survives. The last two
+        // history files + active file must contain the newest rounds.
+        $haystack = (string) @file_get_contents($this->logFile)
+            . (string) @file_get_contents($this->logFile . '.1')
+            . (string) @file_get_contents($this->logFile . '.2');
+        $this->assertStringContainsString('round-' . ($rounds - 1) . ' ', $haystack, 'newest message must survive');
+        $this->assertStringContainsString('round-' . ($rounds - 10) . ' ', $haystack, 'recent messages must survive rotation');
+    }
+
     public function testBuffersUntilThresholdReached(): void
     {
         $target = $this->createTarget(3);

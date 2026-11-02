@@ -5,12 +5,11 @@
 组件类即可。
 
 ```json
-{"app":"yii2s-example","engine":"swoole-coroutine","php":"8.5.4","swoole":"6.2.4","pid":757,"cid":5}
+{"app":"yii2s-example","engine":"swoole-coroutine","php":"8.4.14","swoole":"6.2.2","pid":707,"cid":4}
 ```
 
-基准数据（Linux，WSL2 Ubuntu + swoole-cli，单进程，keep-alive）：纯框架 **13706 QPS**（p50 7.2ms）/
-带 DB 查询 **2829 QPS** / 带 Redis **5823 QPS**，连接池 14144 次借用零超时零泄漏，
-详见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md) 的压测章节。
+基准数据（单进程，本机，keep-alive）：纯框架 **8132 QPS** / 带 DB 查询 **2384 QPS** /
+带 Redis **2851 QPS**，详见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md) 的压测章节。
 
 ---
 
@@ -18,20 +17,18 @@
 
 | 依赖 | 版本 |
 |---|---|
-| PHP | >= 8.2（实测 8.4 / 8.5；Swoole 6 的 PHP 下限即 8.2） |
+| PHP | >= 8.1（实测 8.4） |
 | ext-swoole | ^6.0（协程 Http Server + 连接池） |
 | yiisoft/yii2 | ^2.0 |
 | MySQL / Redis | 可选，按使用的组件而定 |
 
-> **目标平台是 Linux**（生产环境）；macOS 可开发（pecl 编译安装即可）。
-> 两种安装方式：标准 `pecl install swoole`，或
-> [swoole-cli](https://www.swoole.com/page/download)（自带全部扩展的独立二进制，
-> 免配置，Linux 上开箱即用）。不支持 Windows 原生运行。
+> 推荐 [swoole-cli](https://www.swoole.com/page/download)（自带全部扩展的独立二进制），
+> Windows 开发用 msys2 版。生产环境推荐 Linux。
 
 ## 安装
 
 ```bash
-composer require easydowork/yii2s
+composer require yii2s/yii2-swoole
 ```
 
 发布 Packagist 前可通过 path 仓库引入：
@@ -151,27 +148,12 @@ DB 的事务也都原生支持（连接在协程内粘性借用）。
 ## 控制台命令
 
 ```bash
-php yii swoole/start [--host=] [--port=] [--watch]  # 启动（阻塞），写 pid 文件
-php yii swoole/status                               # 查看运行状态
-php yii swoole/stop                                 # 优雅停机（在途请求排空后退出）
-php yii swoole/reload                               # 停机 + 尽力重新拉起（生产建议交给 supervisor）
-php yii swoole/check                                # 配置体检（db/redis 探活、关键配置校验）
-php yii queue/serve [--limit=N]                     # 队列消费 worker（无限轮询）
+php yii swoole/start [--host=] [--port=]   # 启动（阻塞），写 pid 文件
+php yii swoole/status                      # 查看运行状态
+php yii swoole/stop                        # 优雅停机（Windows 走停服标志文件）
+php yii swoole/reload                      # 停机 + 尽力重新拉起（Linux 建议交给 supervisor）
+php yii queue/serve [--limit=N]            # 队列消费 worker（无限轮询）
 ```
-
-### 开发热重载
-
-```bash
-php yii swoole/start --watch
-```
-
-修改 `@app` 下的 PHP 文件后，服务器**自动优雅重启**并加载新代码（约 1 秒内完成，
-在途请求不中断）。轮询 mtime 实现、零外部依赖，Linux/macOS 行为一致。
-可调参数：`watchDirs`（默认 `@app`）、`watchInterval`（默认 0.5s）、
-`watchExcludes`（默认 runtime/vendor 等）。**开发专用**——重启进程，生产禁止。
-
-定时任务等长生命周期特性通过服务器生命周期事件插槽挂载（`on beforeStart` +
-协程循环），示例见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md) 第四部分 4.1。
 
 ## 生产部署（Linux）
 
@@ -218,26 +200,19 @@ swoole-cli scripts/bench.php --path=/demo/db --concurrency=100 --duration=5
 - 需要 `urlManager.enablePrettyUrl = true`（`?r=` 路由依赖 `$_GET`，协程不安全）
 - 协程版 `Http\Server` 不支持 Swoole 原生 `enable_static_handler`，静态文件走 PHP 层
   （`documentRoot`，开发用）或交给 nginx（生产推荐）
+- Windows 的 msys2/cygwin 构建下 exec/popen 受限（`reload` 自动拉起会降级为提示）；
+  Windows 仅供开发，生产用 Linux
 - 不要在常驻进程中使用 `$_SESSION`/`header()`/`setcookie()` 等超全局/过程式 API，
   一律走 `Yii::$app->request/response/session`
 
 ## 开发与测试
 
-目标平台 Linux；一切测试验证在 WSL Ubuntu（或任意 Linux）内完成，
-两条运行时线各 87 tests / 378 assertions 全绿（swoole-cli 6.2.2 与标准
-pecl 构建 PHP 8.5 + swoole 6.2.4，即 CI 同源）：
-
 ```bash
 composer test    # PHPUnit（需要本地 MySQL/Redis）
 composer static  # PHPStan level 5
 composer cs      # php-cs-fixer（与官方 yii2 同规则）
-
-# 端到端（start/status/reload 真实 respawn/SIGTERM）与基准：
-bash scripts/wsl-e2e.sh
-bash scripts/wsl-bench.sh   # 基准: 13706 QPS（纯框架）零错误
+swoole-cli scripts/ci-local.ps1   # 本地一键 CI（Windows）
 ```
-
-标准 pecl 构建的安装与复现步骤见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md) 验证状态一节。
 
 ## License
 

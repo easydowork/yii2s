@@ -90,8 +90,6 @@ class ConnectionPool
         $this->waitTimeout = max(0.0, $waitTimeout);
         $this->destroyer = $destroyer;
         $this->validator = $validator;
-        $this->maxActive = max(1, $maxActive);
-        $this->waitTimeout = max(0.0, $waitTimeout);
         $this->channel = new \Swoole\Coroutine\Channel($this->maxActive);
     }
 
@@ -110,18 +108,13 @@ class ConnectionPool
         $connection = $this->channel->pop(0.001);
         if ($connection !== false) {
             if ($this->isValid($connection)) {
-                $this->totalBorrowed++;
-                $this->trackBorrow($connection);
-                return $connection;
+                return $this->take($connection);
             }
-            $this->discard($connection);
+            $this->destroy($connection);
         }
 
         if ($this->size < $this->maxActive) {
-            $connection = $this->create();
-            $this->totalBorrowed++;
-            $this->trackBorrow($connection);
-            return $connection;
+            return $this->take($this->create());
         }
 
         // Pool exhausted: wait for a returned connection.
@@ -145,17 +138,12 @@ class ConnectionPool
                 }
 
                 if ($this->isValid($connection)) {
-                    $this->totalBorrowed++;
-                    $this->trackBorrow($connection);
-                    return $connection;
+                    return $this->take($connection);
                 }
 
-                $this->discard($connection);
+                $this->destroy($connection);
                 if ($this->size < $this->maxActive) {
-                    $connection = $this->create();
-                    $this->totalBorrowed++;
-                    $this->trackBorrow($connection);
-                    return $connection;
+                    return $this->take($this->create());
                 }
             }
         } finally {
@@ -164,11 +152,15 @@ class ConnectionPool
     }
 
     /**
-     * Marks the connection as borrowed by the current coroutine.
+     * Completes a successful borrow: registers the connection in the tracking
+     * table and updates the counters.
      */
-    private function trackBorrow(object $connection): void
+    private function take(object $connection): object
     {
+        $this->totalBorrowed++;
         $this->borrowed[spl_object_id($connection)] = [$connection, \Swoole\Coroutine::getCid()];
+
+        return $connection;
     }
 
     /**
@@ -177,8 +169,8 @@ class ConnectionPool
      * Sub-coroutines may borrow connections into their own context (every
      * Yii2 DB query does); when such a coroutine dies, nothing releases its
      * connection and it would leak forever. The request manager calls this
-     * after every request; destroyed connections are rebuilt on demand, so
-     * correctness is preferred over reuse here.
+     * after every request; reclaimed connections are destroyed and rebuilt
+     * on demand, so correctness is preferred over reuse here.
      *
      * @return int number of reclaimed connections
      */
@@ -196,10 +188,7 @@ class ConnectionPool
             }
 
             unset($this->borrowed[$id]);
-            if ($this->size > 0) {
-                $this->size--;
-            }
-            $this->totalDiscarded++;
+            $this->destroy($connection);
             $reclaimed++;
         }
 
@@ -222,18 +211,7 @@ class ConnectionPool
      */
     public function discard(object $connection): void
     {
-        unset($this->borrowed[spl_object_id($connection)]);
-        if ($this->destroyer !== null) {
-            try {
-                ($this->destroyer)($connection);
-            } catch (\Throwable) {
-                // Never let cleanup errors break the caller.
-            }
-        }
-        if ($this->size > 0) {
-            $this->size--;
-        }
-        $this->totalDiscarded++;
+        $this->destroy($connection);
     }
 
     /**
@@ -331,13 +309,13 @@ class ConnectionPool
 
     private function destroy(object $connection): void
     {
-        if ($this->destroyer === null) {
-            return;
-        }
-        try {
-            ($this->destroyer)($connection);
-        } catch (\Throwable) {
-            // Swallow cleanup errors by design.
+        unset($this->borrowed[spl_object_id($connection)]);
+        if ($this->destroyer !== null) {
+            try {
+                ($this->destroyer)($connection);
+            } catch (\Throwable) {
+                // Never let cleanup errors break the caller.
+            }
         }
         if ($this->size > 0) {
             $this->size--;

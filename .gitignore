@@ -12,3 +12,6 @@ cookies.txt
 # Third-party reference code (not part of this package)
 /yii2-master/
 /yii2-swoole-master/
+/yii2-swoole-master2/
+/swoole-docs-main/
+/swoole-src-6.2.2/

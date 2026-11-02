@@ -135,4 +135,36 @@ class CoroutineRedisQueueTest extends TestCase
         $this->expectException(\yii\base\InvalidConfigException::class);
         $this->runInCoroutine(fn () => $this->queue->run(1));
     }
+
+    /**
+     * `queue/serve` runs outside a coroutine; polling an empty queue must not
+     * call Swoole\Coroutine::sleep() there (it throws Swoole\Error). Regression
+     * test for the worker crashing on an empty queue.
+     */
+    public function testServeDoesNotCrashPollingEmptyQueueOutsideCoroutine(): void
+    {
+        $queue = new class(['redis' => $this->redis, 'channel' => 'empty-poll']) extends CoroutineRedisQueue {
+            public int $polls = 0;
+
+            public function reserve(): ?array
+            {
+                $this->polls++;
+                if ($this->polls > 2) {
+                    throw new \RuntimeException('stop-sentinel');
+                }
+
+                return null; // always empty
+            }
+        };
+
+        try {
+            $queue->run(0, static function (array $payload): void {
+            });
+            $this->fail('expected the stop-sentinel exception');
+        } catch (\RuntimeException $e) {
+            $this->assertSame('stop-sentinel', $e->getMessage());
+        }
+
+        $this->assertSame(3, $queue->polls);
+    }
 }

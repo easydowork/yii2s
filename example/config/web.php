@@ -11,61 +11,58 @@ return [
     'id' => 'yii2s-example',
     'basePath' => dirname(__DIR__),
     'controllerNamespace' => 'app\controllers',
+    // The only required integration step: this bootstrap replaces the stock
+    // Yii2 component classes (request/response/db/redis) with their coroutine
+    // counterparts - keeping every option configured below - and registers a
+    // default `swooleHttpServer` component when the application has none.
     'bootstrap' => [
         ['class' => \Yii2S\Swoole\Bootstrap::class],
     ],
     'components' => [
+        // No 'class' needed: the stock yii\web\Request is swapped for
+        // CoroutineRequest by the bootstrap above.
         'request' => [
-            'class' => \Yii2S\Swoole\Runtime\CoroutineRequest::class,
             'cookieValidationKey' => 'yii2s-example-cookie-key',
             'enableCsrfValidation' => true,
         ],
         'response' => [
-            'class' => \Yii2S\Swoole\Runtime\CoroutineResponse::class,
             'format' => \yii\web\Response::FORMAT_JSON,
         ],
         'urlManager' => [
             'enablePrettyUrl' => true,
+            // Required: coroutine requests do not populate $_GET, so the
+            // default ?r= routing cannot be used (see README known limits).
             'showScriptName' => false,
-            'rules' => [],
         ],
-        'swooleHttpServer' => [
-            'class' => \Yii2S\Swoole\Server\HttpServer::class,
-            'host' => '127.0.0.1',
-            'port' => 9501,
-            'pidFile' => '@app/runtime/swoole-server.pid',
-            'documentRoot' => '@app/public',
-            'dispatcher' => new \Yii2S\Swoole\Server\RequestDispatcher(__DIR__ . '/web.php', [
-                'enablePoolMetricsEndpoint' => true,
-            ]),
-        ],
+        // Deliberately the stock FPM-era class: the bootstrap swaps it for
+        // CoroutineDbConnection, so an existing application config works
+        // unchanged. Remove the bootstrap to fall back to plain Yii2.
         'db' => [
-            'class' => \Yii2S\Swoole\Db\CoroutineDbConnection::class,
+            'class' => \yii\db\Connection::class,
             'dsn' => 'mysql:host=127.0.0.1;dbname=yii2s_demo',
             'username' => 'root',
             'password' => 'root',
             'charset' => 'utf8mb4',
-            'enableSchemaCache' => false,
+            // poolMaxActive is the hard cap on concurrent queries; raise it
+            // when a request fans out into many parallel sub-queries.
             'poolMaxActive' => 20,
-            'poolWaitTimeout' => 3.0,
         ],
         'redis' => [
-            'class' => \Yii2S\Swoole\Redis\CoroutineRedisConnection::class,
+            'class' => \yii\redis\Connection::class, // swapped by the bootstrap
             'hostname' => '127.0.0.1',
             'port' => 6379,
             'poolMaxActive' => 20,
         ],
+        // Cache/session/queue have no stock counterpart worth wrapping, so
+        // their coroutine classes are configured explicitly.
         'cache' => [
             'class' => \Yii2S\Swoole\Cache\CoroutineRedisCache::class,
-            'redis' => 'redis',
         ],
         'session' => [
             'class' => \Yii2S\Swoole\Session\CoroutineSession::class,
-            'redis' => 'redis',
         ],
         'queue' => [
             'class' => \Yii2S\Swoole\Queue\CoroutineRedisQueue::class,
-            'redis' => 'redis',
             'channel' => 'example',
             'ttr' => 5,
             'maxAttempts' => 3,
@@ -76,15 +73,24 @@ return [
             },
         ],
         'log' => [
-            'traceLevel' => 0,
             'targets' => [
                 [
                     'class' => \Yii2S\Swoole\Log\CoroutineFileTarget::class,
-                    'levels' => ['error', 'warning', 'info'],
                     'logFile' => '@app/runtime/logs/app.log',
                     'maxBufferMessages' => 20,
                 ],
             ],
+        ],
+        // Everything below is optional: with no swooleHttpServer component
+        // the bootstrap registers one pointing at this config file
+        // (defaults: 127.0.0.1:9501, pid file under @app/runtime).
+        'swooleHttpServer' => [
+            'class' => \Yii2S\Swoole\Server\HttpServer::class,
+            'port' => 9501,
+            'documentRoot' => '@app/public',
+            'dispatcher' => new \Yii2S\Swoole\Server\RequestDispatcher(__DIR__ . '/web.php', [
+                'enablePoolMetricsEndpoint' => true,
+            ]),
         ],
     ],
 ];

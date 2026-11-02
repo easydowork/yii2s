@@ -38,10 +38,50 @@ class CoroutineSession extends Session
 
     private bool $idFromClient = false;
 
+    private int $timeoutSeconds = 1440;
+
     public function init(): void
     {
         parent::init();
         $this->redis = Instance::ensure($this->redis, CoroutineRedisConnection::class);
+    }
+
+    /**
+     * Overrides the parent setter, which writes the PHP ini setting
+     * `session.gc_maxlifetime`. This session never uses the native PHP
+     * session machinery (garbage collection is handled by the Redis TTL),
+     * so the ini write is pointless at best - and it throws once the
+     * resident server rebuilds this component on a later request with
+     * output already started.
+     */
+    public function setTimeout($value): void
+    {
+        $this->timeoutSeconds = (int) $value;
+    }
+
+    public function getTimeout(): int
+    {
+        return $this->timeoutSeconds;
+    }
+
+    /**
+     * Strict mode has no meaning without the native session machinery: the
+     * session id always comes from the client cookie or a freshly generated
+     * random value, never from an uninitialized store. Overridden purely to
+     * avoid the parent's ini write.
+     */
+    public function setUseStrictMode($value): void
+    {
+        // accepted for configuration compatibility; intentionally ignored
+    }
+
+    /**
+     * Garbage collection is handled by the Redis TTL; the probability knobs
+     * only affect the native session handler, so they are ignored.
+     */
+    public function setGcProbability($value): void
+    {
+        // accepted for configuration compatibility; intentionally ignored
     }
 
     public function open(): void
@@ -50,7 +90,12 @@ class CoroutineSession extends Session
             return;
         }
 
-        $this->sessionId = $this->resolveSessionId();
+        // An explicitly assigned id (setId()) wins over the client cookie,
+        // matching yii\web\Session semantics (session_id($this->getId())).
+        // Cookie-based resolution only runs when no id was assigned.
+        if ($this->sessionId === null) {
+            $this->sessionId = $this->resolveSessionId();
+        }
         $this->opened = true;
 
         $raw = $this->redis->executeCommand('GET', [$this->storageKey()]);

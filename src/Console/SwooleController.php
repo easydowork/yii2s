@@ -24,17 +24,28 @@ class SwooleController extends Controller
 {
     public string $serverComponent = 'swooleHttpServer';
 
+    /**
+     * Optional host/port overrides for the target server. Applied to the
+     * server component before resolving its pid file, so stop/status/reload
+     * can address a server that was started with non-default options.
+     */
+    public ?string $host = null;
+
+    public ?int $port = null;
+
     private ?HttpServer $server = null;
 
     public function options($actionID): array
     {
-        return array_merge(parent::options($actionID), ['serverComponent']);
+        return array_merge(parent::options($actionID), ['serverComponent', 'host', 'port']);
     }
 
     public function optionAliases(): array
     {
         return array_merge(parent::optionAliases(), [
             'c' => 'serverComponent',
+            'H' => 'host',
+            'p' => 'port',
         ]);
     }
 
@@ -42,23 +53,23 @@ class SwooleController extends Controller
      * Starts the Swoole HTTP server (blocks until stopped with Ctrl+C, a stop
      * signal or the stop flag file, e.g. created by `swoole/stop`).
      */
-    public function actionStart(?string $host = null, ?string $port = null): int
+    public function actionStart(): int
     {
         $server = $this->resolveServer();
         if ($server === null) {
             return ExitCode::UNSPECIFIED_ERROR;
         }
 
-        if ($host !== null) {
-            $server->host = $host;
+        if ($this->host !== null) {
+            $server->host = $this->host;
         }
 
-        if ($port !== null) {
-            if (!is_numeric($port) || (int) $port < 1 || (int) $port > 65535) {
+        if ($this->port !== null) {
+            if ($this->port < 1 || $this->port > 65535) {
                 $this->stderr("Invalid port specified.\n");
                 return ExitCode::UNSPECIFIED_ERROR;
             }
-            $server->port = (int) $port;
+            $server->port = $this->port;
         }
 
         // Guard against starting a second server on the same pid file (which
@@ -97,22 +108,16 @@ class SwooleController extends Controller
     /**
      * Stops a running Swoole HTTP server through its stop flag file.
      */
-    public function actionStop(?string $host = null, ?int $port = null): int
+    public function actionStop(): int
     {
         $server = $this->resolveServer(false);
         if ($server === null) {
             return ExitCode::UNSPECIFIED_ERROR;
         }
 
-        $pidFile = $this->resolvePidFile($server, $host, $port);
-        if (!$pidFile->exists()) {
-            $this->stdout("Server is not running (pid file not found).\n");
-            return ExitCode::OK;
-        }
-        if (!$pidFile->isAlive()) {
-            $this->stdout("Stale pid file found (process is gone); cleaning up.\n");
-            $pidFile->remove();
-            $server->getStopFlagFile()->remove();
+        $pidFile = $this->resolveRunningPidFile($server);
+        if ($pidFile === null) {
+            $this->stdout("Server is not running.\n");
             return ExitCode::OK;
         }
 
@@ -132,25 +137,20 @@ class SwooleController extends Controller
      * command line stored in the pid file. On Linux, prefer a process manager
      * (supervisor/systemd) which restarts the server on SIGTERM exit.
      */
-    public function actionReload(?string $host = null, ?int $port = null): int
+    public function actionReload(): int
     {
         $server = $this->resolveServer(false);
         if ($server === null) {
             return ExitCode::UNSPECIFIED_ERROR;
         }
 
-        $pidFile = $this->resolvePidFile($server, $host, $port);
-        $info = $pidFile->read();
-        if (!$pidFile->exists() || $info === null) {
-            $this->stdout("Server is not running (pid file not found).\n");
-            return ExitCode::OK;
-        }
-        if (!$pidFile->isAlive()) {
-            $this->stdout("Stale pid file found (process is gone); cleaning up.\n");
-            $pidFile->remove();
+        $pidFile = $this->resolveRunningPidFile($server);
+        if ($pidFile === null) {
+            $this->stdout("Server is not running.\n");
             return ExitCode::OK;
         }
 
+        $info = $pidFile->read();
         $command = is_array($info['command'] ?? null) ? $info['command'] : [];
         if ($command === []) {
             $this->stderr("Pid file does not contain the original command line; cannot respawn.\n");
@@ -176,25 +176,20 @@ class SwooleController extends Controller
     /**
      * Shows the state of a running Swoole HTTP server.
      */
-    public function actionStatus(?string $host = null, ?int $port = null): int
+    public function actionStatus(): int
     {
         $server = $this->resolveServer(false);
         if ($server === null) {
             return ExitCode::UNSPECIFIED_ERROR;
         }
 
-        $pidFile = $this->resolvePidFile($server, $host, $port);
-        $info = $pidFile->read();
-        if (!$pidFile->exists() || $info === null) {
+        $pidFile = $this->resolveRunningPidFile($server);
+        if ($pidFile === null) {
             $this->stdout("Server is not running.\n");
             return ExitCode::OK;
         }
 
-        if (!$pidFile->isAlive()) {
-            $this->stdout("Stale pid file found (process is gone).\n");
-            return ExitCode::OK;
-        }
-
+        $info = $pidFile->read();
         $this->stdout(sprintf(
             "Server is running: pid %s, listening on %s:%s, started %s\n",
             (string) ($info['pid'] ?? '?'),
@@ -228,16 +223,37 @@ class SwooleController extends Controller
      * Pid file of the target server; console options override the component
      * configuration, mirroring how `swoole/start` applies its options.
      */
-    private function resolvePidFile(HttpServer $server, ?string $host, ?int $port): PidFile
+    private function resolvePidFile(HttpServer $server): PidFile
     {
-        if ($host !== null) {
-            $server->host = $host;
+        if ($this->host !== null) {
+            $server->host = $this->host;
         }
-        if ($port !== null) {
-            $server->port = $port;
+        if ($this->port !== null) {
+            $server->port = $this->port;
         }
 
         return $server->getPidFile();
+    }
+
+    /**
+     * Returns the pid file of a *live* server, or null when it is not
+     * running. Stale entries (process gone) are cleaned up on the spot,
+     * including the stop flag file - a leftover flag would make the next
+     * start's flag watcher shut the server down immediately.
+     */
+    private function resolveRunningPidFile(HttpServer $server): ?PidFile
+    {
+        $pidFile = $this->resolvePidFile($server);
+        if (!$pidFile->exists()) {
+            return null;
+        }
+        if (!$pidFile->isAlive()) {
+            $pidFile->remove();
+            $server->getStopFlagFile()->remove();
+            return null;
+        }
+
+        return $pidFile;
     }
 
     /**
@@ -262,11 +278,15 @@ class SwooleController extends Controller
      * systems restrict exec/popen/proc_open from PHP); the caller then tells
      * the user to start the server manually.
      *
+     * The stored command is the script invocation without the interpreter
+     * (e.g. `example/yii swoole/start`), so PHP_BINARY is prepended - the
+     * entry script has no shebang and would not execute on its own.
+     *
      * @param array<int, string> $command
      */
     private function respawn(array $command): bool
     {
-        $commandLine = implode(' ', array_map(
+        $commandLine = escapeshellarg(PHP_BINARY) . ' ' . implode(' ', array_map(
             static fn (string $part): string => escapeshellarg($part),
             $command
         ));

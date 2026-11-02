@@ -12,6 +12,7 @@ namespace Yii2S\Swoole\Runtime;
 
 use Swoole\Http\Request as SwooleRequest;
 use Yii;
+use yii\base\InvalidConfigException;
 use yii\web\Cookie;
 use yii\web\CookieCollection;
 use yii\web\HeaderCollection;
@@ -45,6 +46,10 @@ class CoroutineRequest extends Request
 
     private ?array $bodyParams = null;
 
+    private ?array $fileParams = null;
+
+    private array $rawCookies = [];
+
     /**
      * Binds the request to a Swoole HTTP request for the current coroutine.
      */
@@ -58,6 +63,19 @@ class CoroutineRequest extends Request
         $this->cookieCollection = null;
         $this->queryParams = null;
         $this->bodyParams = null;
+        $this->fileParams = null;
+        $this->rawCookies = [];
+
+        // yii\web\UploadedFile reads the $_FILES superglobal directly (see
+        // its loadFiles()), so the official upload API only works when it is
+        // populated per request. Filling it here keeps it bound to the
+        // request lifecycle - RequestStateManager::cleanup() empties it
+        // again - and reset() clears UploadedFile's own static cache, which
+        // would otherwise leak the previous request's files.
+        $_FILES = $this->getFileParams();
+        if (class_exists(\yii\web\UploadedFile::class)) {
+            \yii\web\UploadedFile::reset();
+        }
     }
 
     public function getSwooleRequest(): ?SwooleRequest
@@ -128,6 +146,122 @@ class CoroutineRequest extends Request
         $raw = $this->swooleRequest?->rawContent();
 
         return is_string($raw) ? $raw : '';
+    }
+
+    /**
+     * Uploaded files as the PHP-standard $_FILES structure, converted from
+     * Swoole's `$request->files`. This feeds `yii\web\UploadedFile`, so
+     * multipart uploads work through the regular Yii2 API.
+     *
+     * Swoole already materialized the payload into temporary files, but the
+     * shape depends on the field name and (across builds/paths) on how the
+     * parser was invoked:
+     *
+     * - single-file field (`upload`) -> one entry shaped like $_FILES;
+     * - array-style fields (`files[0]`, `files[1]`) with the standard C++
+     *   parser -> the attribute-grouped structure PHP produces natively
+     *   (`['name' => [...], 'tmp_name' => [...], ...]`);
+     * - the same fields on some build paths -> an entry *group* (file
+     *   entries under one field key), which is converted to the grouped
+     *   shape above.
+     *
+     * All three normalize to what `UploadedFile::getInstancesByName()`
+     * expects; Swoole error codes are mapped to the PHP UPLOAD_ERR_*
+     * constants.
+     */
+    public function getFileParams(): array
+    {
+        if ($this->fileParams === null) {
+            $files = $this->swooleRequest?->files;
+            $this->fileParams = is_array($files) ? $this->convertUploadedFiles($files) : [];
+        }
+
+        return $this->fileParams;
+    }
+
+    /**
+     * @param array<string, mixed> $files raw Swoole uploaded-file entries
+     * @return array<string, mixed> PHP $_FILES-shaped entries
+     */
+    private function convertUploadedFiles(array $files): array
+    {
+        $converted = [];
+        foreach ($files as $key => $entry) {
+            if (!is_array($entry) || !isset($entry['name'])) {
+                continue;
+            }
+            if (is_string($entry['name']) && isset($entry['tmp_name'])) {
+                // Single-file field - already the PHP shape.
+                $converted[(string) $key] = $this->convertFileEntry($entry);
+                continue;
+            }
+            if (is_array($entry['name'])) {
+                // Attribute-grouped multi-file shape (PHP's native $_FILES
+                // structure) - map the Swoole error codes in place.
+                if (isset($entry['error']) && is_array($entry['error'])) {
+                    $entry['error'] = array_map(
+                        fn (mixed $code): int => $this->mapUploadError((int) $code),
+                        $entry['error']
+                    );
+                }
+                $converted[(string) $key] = $entry;
+                continue;
+            }
+
+            // Entry group: many file entries under one field key. Convert to
+            // the attribute-grouped $_FILES structure PHP produces natively.
+            $grouped = ['name' => [], 'type' => [], 'tmp_name' => [], 'size' => [], 'error' => []];
+            $hasFiles = false;
+            foreach ($entry as $index => $item) {
+                if (!is_array($item) || !isset($item['name'], $item['tmp_name']) || !is_string($item['name'])) {
+                    continue;
+                }
+                $file = $this->convertFileEntry($item);
+                foreach ($grouped as $attribute => $values) {
+                    $grouped[$attribute][$index] = $file[$attribute];
+                }
+                $hasFiles = true;
+            }
+            if ($hasFiles) {
+                $converted[(string) $key] = $grouped;
+            }
+        }
+
+        return $converted;
+    }
+
+    /**
+     * @param array<string, mixed> $entry one Swoole file entry
+     * @return array{name: string, type: string, tmp_name: string, size: int, error: int}
+     */
+    private function convertFileEntry(array $entry): array
+    {
+        return [
+            'name' => (string) $entry['name'],
+            'type' => (string) ($entry['type'] ?? ''),
+            'tmp_name' => (string) $entry['tmp_name'],
+            'size' => (int) ($entry['size'] ?? 0),
+            'error' => $this->mapUploadError((int) ($entry['error'] ?? 0)),
+        ];
+    }
+
+    /**
+     * Maps Swoole upload error codes to the PHP UPLOAD_ERR_* constants.
+     */
+    private function mapUploadError(int $swooleError): int
+    {
+        // Codes that align with PHP semantics pass through; the remaining
+        // Swoole-side failures map to the closest PHP semantic.
+        return match ($swooleError) {
+            \UPLOAD_ERR_OK,
+            \UPLOAD_ERR_INI_SIZE,
+            \UPLOAD_ERR_FORM_SIZE,
+            \UPLOAD_ERR_PARTIAL,
+            \UPLOAD_ERR_NO_FILE,
+            \UPLOAD_ERR_CANT_WRITE => $swooleError,
+            5, 6, 8 => \UPLOAD_ERR_CANT_WRITE,
+            default => \UPLOAD_ERR_NO_TMP_DIR,
+        };
     }
 
     public function getContentType(): ?string
@@ -201,7 +335,24 @@ class CoroutineRequest extends Request
             return true;
         }
 
-        return strtolower((string) $this->getHeaders()->get('X-Forwarded-Proto')) === 'https';
+        // Honor Yii2's [[secureProtocolHeaders]] configuration (defaults to
+        // `X-Forwarded-Proto => ['https']`) instead of hard-coding the header,
+        // so deployments not sitting behind a trusted reverse proxy can disable
+        // proxy-header trust. Headers are read via the coroutine-safe
+        // [[getHeaders()]], never the process-global superglobals.
+        foreach ($this->secureProtocolHeaders as $header => $values) {
+            $headerValue = $this->getHeaders()->get($header);
+            if ($headerValue === null) {
+                continue;
+            }
+            foreach ($values as $value) {
+                if (strcasecmp((string) $headerValue, (string) $value) === 0) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     public function getUserIP(): ?string
@@ -217,21 +368,61 @@ class CoroutineRequest extends Request
     public function getCookies(): CookieCollection
     {
         if ($this->cookieCollection === null) {
-            $cookies = [];
             // ->cookie is null when the request carries no cookies.
             $rawCookies = $this->swooleRequest === null ? null : $this->swooleRequest->cookie;
-            if (is_array($rawCookies)) {
-                foreach ($rawCookies as $name => $value) {
-                    $cookies[(string) $name] = new Cookie([
-                        'name' => (string) $name,
-                        'value' => (string) $value,
-                    ]);
-                }
-            }
-            $this->cookieCollection = new CookieCollection($cookies);
+            $this->rawCookies = is_array($rawCookies) ? $rawCookies : [];
+            $this->cookieCollection = new CookieCollection($this->loadCookies());
         }
 
         return $this->cookieCollection;
+    }
+
+    /**
+     * Official `yii\web\Request::loadCookies()` semantics applied to the
+     * Swoole cookie table: signed cookies are hash-validated through
+     * [[cookieValidationKey]] and unwrapped, invalid ones are dropped. Never
+     * trust raw cookie values - the auto-login identity cookie flows through
+     * here, and skipping validation would let anyone impersonate a user.
+     *
+     * @return array<string, Cookie>
+     */
+    protected function loadCookies(): array
+    {
+        $rawCookies = $this->rawCookies;
+        $cookies = [];
+        if ($this->enableCookieValidation) {
+            if ($this->cookieValidationKey === '') {
+                throw new InvalidConfigException(get_class($this) . '::cookieValidationKey must be configured with a secret key.');
+            }
+
+            foreach ($rawCookies as $name => $value) {
+                if (!is_string($value)) {
+                    continue;
+                }
+                $data = Yii::$app->security->validateData($value, $this->cookieValidationKey);
+                if ($data === false) {
+                    continue; // tampered or foreign cookie - drop silently
+                }
+                $data = @unserialize($data);
+                if (is_array($data) && count($data) === 2 && $data[0] === (string) $name) {
+                    $cookies[(string) $name] = new Cookie([
+                        'name' => (string) $name,
+                        'value' => (string) $data[1],
+                    ]);
+                }
+            }
+
+            return $cookies;
+        }
+
+        foreach ($rawCookies as $name => $value) {
+            $cookies[(string) $name] = new Cookie([
+                'name' => (string) $name,
+                'value' => (string) $value,
+            ]);
+        }
+
+        return $cookies;
     }
 
     private function getRequestUri(): string

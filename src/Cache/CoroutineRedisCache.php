@@ -65,7 +65,10 @@ class CoroutineRedisCache extends Cache
     protected function addValue($key, $value, $duration): bool
     {
         if ($duration > 0) {
-            $result = $this->redis->executeCommand('SET', [$key, $value, ['NX', 'EX', (int) ceil($duration)]]);
+            // phpredis expects the EX option as an associative `'EX' => seconds`
+            // entry; a numeric-indexed `['NX', 'EX', 10]` silently drops the
+            // expiry, leaving the key without a TTL.
+            $result = $this->redis->executeCommand('SET', [$key, $value, ['NX', 'EX' => (int) ceil($duration)]]);
         } else {
             $result = $this->redis->executeCommand('SET', [$key, $value, ['NX']]);
         }
