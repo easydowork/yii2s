@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<phpunit
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    backupGlobals="true"
+    bootstrap="./tests/bootstrap.php"
+    colors="true"
+    convertErrorsToExceptions="true"
+    convertNoticesToExceptions="true"
+    convertWarningsToExceptions="true"
+    convertDeprecationsToExceptions="false"
+    executionOrder="default"
+    failOnRisky="true"
+    failOnWarning="true"
+    stopOnFailure="false"
+>
+    <testsuites>
+        <testsuite name="Yii2S Swoole Test Suite">
+            <directory>./tests/pools</directory>
+            <directory>./tests/db</directory>
+            <directory>./tests/redis</directory>
+            <directory>./tests/cache</directory>
+            <directory>./tests/session</directory>
+            <directory>./tests/queue</directory>
+            <directory>./tests/log</directory>
+            <directory>./tests/runtime</directory>
+            <directory>./tests/server</directory>
+        </testsuite>
+    </testsuites>
+
+    <coverage>
+        <include>
+            <directory suffix=".php">src/</directory>
+        </include>
+    </coverage>
+</phpunit>

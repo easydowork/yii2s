@@ -1,0 +1,23 @@
+parameters:
+    level: 5
+    paths:
+        - src
+        - tests
+    excludePaths:
+        - tests/data
+    scanFiles:
+        - vendor/yiisoft/yii2/Yii.php
+    scanDirectories:
+        - vendor/swoole/ide-helper/src
+        - vendor/yiisoft/yii2
+    ignoreErrors:
+        # YII_DEBUG is defined by the application entry scripts, so phpstan
+        # (which sees the test bootstrap) considers the check redundant.
+        -
+            message: '#If condition is always true#'
+            path: src/Server/RequestDispatcher.php
+        # The server state changes inside a separate coroutine, which phpstan
+        # cannot model: it assumes isRunning() never flips back to false.
+        -
+            message: '#Negated boolean expression is always true\.#'
+            path: tests/server/HttpServerPidFileTest.php

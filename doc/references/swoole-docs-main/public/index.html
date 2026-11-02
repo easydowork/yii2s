@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Page Redirection</title>
+</head>
+<body>
+<script type="text/javascript">
+    let userLang = navigator.language || navigator.userLanguage;
+    userLang = userLang.substring(0, 2).toLowerCase();
+    let path = '/en/'
+    switch (userLang) {
+        case 'zh':
+            path = '/zh-cn/';
+            break;
+        default:
+            break;
+    }
+    // redirect with hash
+    if (window.location.hash){
+        path += window.location.hash;
+    }
+
+    window.onload = function () {
+        window.location.href = path;
+    }
+    document.write(`<p>Redirect to <a href="${path}">${path} docs</a></p>`)
+</script>
+</body>
+</html>

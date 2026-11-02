@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Vue SPA ? API demo</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
+        li { margin: .3rem 0; }
+        input, textarea { width: 100%; margin: .2rem 0; }
+        button { margin: .3rem 0; }
+    </style>
+</head>
+<body>
+<div id="app">
+    <h1>Vue3 + REST API</h1>
+    <p v-if="error" style="color:#c00">{{ error }}</p>
+    <form @submit.prevent="create">
+        <input v-model="title" placeholder="title" required>
+        <textarea v-model="content" placeholder="content" rows="3" required></textarea>
+        <button type="submit">Create (session-authenticated)</button>
+    </form>
+    <ul>
+        <li v-for="p in posts" :key="p.id">
+            <b>{{ p.title }}</b> ? {{ p.content?.slice(0, 60) }}
+            <button @click="remove(p.id)">delete</button>
+        </li>
+    </ul>
+</div>
+<script>
+const { createApp, ref, onMounted } = Vue;
+createApp({
+    setup() {
+        const posts = ref([]);
+        const title = ref('');
+        const content = ref('');
+        const error = ref('');
+
+        const load = async () => {
+            error.value = '';
+            const res = await fetch('/api/posts');
+            posts.value = await res.json();
+        };
+        const create = async () => {
+            error.value = '';
+            const res = await fetch('/api/posts', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ title: title.value, content: content.value }),
+            });
+            const data = await res.json();
+            if (res.ok) { title.value = ''; content.value = ''; await load(); }
+            else { error.value = data.error === 'login required' ? 'login required (visit /admin/default/login)' : JSON.stringify(data.error); }
+        };
+        const remove = async (id) => {
+            const res = await fetch('/api/posts/' + id, { method: 'DELETE' });
+            if (res.ok) { await load(); } else { error.value = 'delete failed (login required?)'; }
+        };
+
+        onMounted(load);
+        return { posts, title, content, error, create, remove };
+    },
+}).mount('#app');
+</script>

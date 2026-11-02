@@ -1,0 +1,15 @@
+﻿/vendor/
+/composer.lock
+/example/runtime/
+/tests/runtime/
+*.log
+cookies.txt
+
+# Local development
+.php-cs-fixer.cache
+.phpunit.result.cache
+.phpunit.cache/
+
+# Third-party reference code (not part of this package)
+/yii2-master/
+/yii2-swoole-master/

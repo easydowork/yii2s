@@ -1,0 +1,19 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+defined('YII_DEBUG') or define('YII_DEBUG', true);
+defined('YII_ENV') or define('YII_ENV', 'dev');
+
+require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/../vendor/yiisoft/yii2/Yii.php';
+
+$config = require __DIR__ . '/config/web.php';
+
+// The shared config is web-oriented; strip web-only request components for
+// console use. swooleHttpServer must stay so Bootstrap registers the command.
+unset($config['components']['request'], $config['components']['response']);
+
+$application = new yii\console\Application($config);
+exit($application->run());

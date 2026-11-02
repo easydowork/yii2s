@@ -1,0 +1,39 @@
+--TEST--
+swoole_curl/multi: select twice
+--SKIPIF--
+<?php
+require __DIR__ . '/../../include/skipif.inc';
+?>
+--FILE--
+<?php
+require __DIR__ . '/../../include/bootstrap.php';
+require_once TESTS_API_PATH.'/curl_multi.php';
+
+use Swoole\Runtime;
+
+use function Swoole\Coroutine\run;
+
+Runtime::enableCoroutine(SWOOLE_HOOK_NATIVE_CURL);
+run(function () {
+    $n = 4;
+    while ($n--) {
+        go(function () {
+            swoole_test_curl_multi(['select_twice' => true]);
+            echo "Done\n";
+        });
+    }
+});
+?>
+--EXPECTF--
+Fatal error: Uncaught Swoole\Error: This cURL handle is currently executing in coroutine#%d, cannot be operated in %s:%d
+Stack trace:
+#0 %s(%d): curl_multi_select(%s)
+%A
+  thrown in %s on line %d
+
+ [Coroutine-%d] Stack trace:
+ -------------------------------------------------------------------
+#0 %s(%d): curl_multi_select(Object(CurlMultiHandle))
+#1 %s(%d): swoole_test_curl_multi_ex(Object(CurlMultiHandle), Array)
+#2 %s(%d): swoole_test_curl_multi(Array)
+#3 [internal function]: {%s}()
