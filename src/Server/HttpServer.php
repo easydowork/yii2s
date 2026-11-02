@@ -296,6 +296,9 @@ class HttpServer extends Component
 
     /**
      * Whether the server is currently running.
+     *
+     * @phpstan-impure The value changes when the server shuts down from
+     * another coroutine - callers poll it as a state signal.
      */
     public function isRunning(): bool
     {

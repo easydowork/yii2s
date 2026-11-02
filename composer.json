@@ -45,19 +45,8 @@
         "allow-plugins": {
             "yiisoft/yii2-composer": true,
             "yidas/yii2-composer-bower-skip": true
-        },
-        "policy": {
-            "advisories": {
-                "block": false
-            }
         }
     },
-    "repositories": [
-        {
-            "type": "composer",
-            "url": "https://mirrors.cloud.tencent.com/composer/"
-        }
-    ],
     "minimum-stability": "stable",
     "prefer-stable": true,
     "scripts": {

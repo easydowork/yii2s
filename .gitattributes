@@ -3,3 +3,11 @@
 # final `swoole/stop` becoming `swoole/stop\r`). Force LF regardless of
 # core.autocrlf so the scripts stay runnable everywhere.
 *.sh text eol=lf
+
+# The distribution archive (what `composer require` downloads) contains the
+# runtime plus docs needed to use it - development infrastructure stays out.
+/doc            export-ignore
+/tests          export-ignore
+/scripts        export-ignore
+/example        export-ignore
+/.github        export-ignore

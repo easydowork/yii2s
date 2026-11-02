@@ -63,10 +63,7 @@ class SwooleCheckTest extends TestCase
         Yii::$app->set('swooleHttpServer', $server);
 
         /** @var SwooleController $controller */
-        $controller = Yii::$app->controllerMap['swoole'];
-        if (is_array($controller)) {
-            $controller = Yii::createObject($controller);
-        }
+        $controller = Yii::createObject(SwooleController::class);
 
         return $controller;
     }

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Documentation consolidated into a single `doc/DEVELOPMENT.md`** (the
+  separate ROADMAP.md / REVIEW.md / SECURITY-REVIEW.md are merged there,
+  reorganized by usage journey: quick start -> resident-memory guidelines ->
+  architecture -> ops/deployment -> testing -> extension roadmap -> pitfall
+  log -> review appendices).
+
 ### Added
 
 - **Development hot reload**: `swoole/start --watch` polls application PHP

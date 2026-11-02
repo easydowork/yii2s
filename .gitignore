@@ -9,9 +9,7 @@ cookies.txt
 .phpunit.result.cache
 .phpunit.cache/
 
-# Third-party reference code (not part of this package)
-/yii2-master/
-/yii2-swoole-master/
-/yii2-swoole-master2/
-/swoole-docs-main/
-/swoole-src-6.2.2/
+# Third-party reference code (not part of this package) — kept out of the
+# repo entirely; drop the folders into doc/references/ when needed locally
+# (Yii2 framework sources, Swoole docs/source, prior-art extensions).
+/doc/references/

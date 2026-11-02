@@ -5,7 +5,7 @@
 组件类即可。
 
 ```json
-{"app":"yii2s-example","engine":"swoole-coroutine","php":"8.4.14","swoole":"6.2.2","pid":707,"cid":4}
+{"app":"yii2s-example","engine":"swoole-coroutine","php":"8.5.4","swoole":"6.2.4","pid":757,"cid":5}
 ```
 
 基准数据（Linux，WSL2 Ubuntu + swoole-cli，单进程，keep-alive）：纯框架 **13706 QPS**（p50 7.2ms）/
@@ -171,7 +171,7 @@ php yii swoole/start --watch
 `watchExcludes`（默认 runtime/vendor 等）。**开发专用**——重启进程，生产禁止。
 
 定时任务等长生命周期特性通过服务器生命周期事件插槽挂载（`on beforeStart` +
-协程循环），示例见 [`doc/ROADMAP.md`](doc/ROADMAP.md)。
+协程循环），示例见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md) 第四部分 4.1。
 
 ## 生产部署（Linux）
 
