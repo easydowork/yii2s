@@ -2,9 +2,9 @@
 
 > 项目：`yii2s/yii2-swoole`
 > 日期：2026-11-02
-> 范围：`src/` 全部 23 个文件 + `tests/` 回归验证
-> 结论：发现并修复 **6 个缺陷**（2 个 P0 崩溃/数据错误、3 个 P1 安全、1 个 P2 并发正确性），新增 4 个回归测试 + 1 个断言。
-> 验证：PHPUnit **72 tests / 251 assertions 全绿**；PHPStan level 5 **零错误**；php-cs-fixer **0 需修复**。
+> 范围：`src/` 全部源码 + `tests/` 回归 + WSL Ubuntu 全量验证
+> 结论：发现并修复 **6 个源码缺陷**（2 P0 / 3 P1 / 1 P2）+ **2 个测试脚本缺陷**（P3），新增 4 个回归测试 + 1 个断言。
+> 验证：Windows 与 WSL Ubuntu **双环境全绿**——WSL Ubuntu 26.04（swoole-cli 6.2.2 / PHP 8.4.25）PHPUnit **87 tests / 378 assertions**、PHPStan level 5 零错误、php-cs-fixer 0 需修复、端到端全链路 + 基准零泄漏通过。
 
 ---
 
@@ -207,7 +207,58 @@
 
 ---
 
+### P3-1 `wsl-e2e.sh` SIGTERM 步骤读不到 pid（测试脚本缺陷）
+
+| 项 | 内容 |
+|---|---|
+| 严重度 | **P3 / 测试基建**（端到端第 4 步「SIGTERM 优雅停机」必然失败） |
+| 位置 | `scripts/wsl-e2e.sh`（修复前第 26 行） |
+| 复现 | `example/config/web.php` 已删除 `pidFile` 配置（改用默认 `/tmp/yii2s-swoole-{host}-{port}.pid`），脚本却硬编码 `~/yii2s/example/runtime/swoole-server.pid`，`kill -TERM` 拿到空 pid → `UNEXPECTED: 200` |
+
+**原因**：`example` 配置演进后 pid 文件路径从 `@app/runtime/...` 变为 `sys_get_temp_dir()` 默认路径，脚本未同步。
+
+**修复**：改用默认路径，并经 `$argv[1]` 传参避免 shell 转义，同时加空值守卫：
+
+```24:31:scripts/wsl-e2e.sh
+echo "=== 4. SIGTERM graceful ==="
+PIDFILE="/tmp/yii2s-swoole-127.0.0.1-9601.pid"
+SERVER_PID=$($CLI -r '$d=json_decode(file_get_contents($argv[1]), true); echo (is_array($d) && isset($d["pid"])) ? $d["pid"] : "";' "$PIDFILE")
+if [ -z "$SERVER_PID" ]; then
+  echo "FAILED to read server pid from $PIDFILE"
+  exit 1
+fi
+kill -TERM "$SERVER_PID"
+```
+
+**验证**：重跑后输出 `server stopped gracefully (SIGTERM)`。
+
+---
+
+### P3-2 `wsl-bench.sh` CRLF 行尾污染收尾命令（测试脚本缺陷）
+
+| 项 | 内容 |
+|---|---|
+| 严重度 | **P3 / 测试基建**（基准收尾 `swoole/stop` 变成 `swoole/stop\r` 失败） |
+| 位置 | `scripts/wsl-bench.sh`（最后一行）+ 新增 `.gitattributes` |
+| 复现 | `core.autocrlf=true` 使 `.sh` 以 CRLF 存储，bash 执行时最后一行命令带上 `\r` → `Unknown command: swoole/stop` |
+
+**原因**：仓库无 `.gitattributes`，且 `core.autocrlf=true`，导致 shell 脚本在 git 中以 CRLF 落盘（正是 `DEVELOPMENT.md` 坑 #23 反复出现的根源）。
+
+**修复**：脚本去 CRLF，并新增 `.gitattributes` 强制 LF，根治：
+
+```1:4:.gitattributes
+# Shell scripts must use LF line endings: they are executed by bash inside
+# WSL/Linux, where a trailing CR breaks the last command.
+*.sh text eol=lf
+```
+
+**验证**：重跑后基准数据正常且收尾 stop 不再报错；`git check-attr` 确认 `.sh` 为 `eol: lf`。
+
+---
+
 ## 三、测试与验证
+
+### 3.1 Windows（msys2 swoole-cli，修复当时）
 
 | 检查项 | 命令 | 结果 |
 |---|---|---|
@@ -216,6 +267,25 @@
 | php-cs-fixer | `php vendor/friendsofphp/php-cs-fixer/php-cs-fixer check --diff` | **0 需修复** |
 | queue 端到端 | `example/yii queue/serve --limit=1` | 正常消费 1 个任务 |
 | queue 空队列 | `example/yii queue/serve` 空队列运行 2s | 不再崩溃，无错误输出 |
+
+### 3.2 WSL Ubuntu 26.04（Linux 原生运行时，本轮复核）
+
+> 环境：swoole-cli 6.2.2 / PHP 8.4.25（`/usr/local/bin/swoole-cli`）+ 标准 PHP 8.5.4；MySQL/Redis 经 mirrored 网络以 `127.0.0.1` 直连 Windows。
+
+| 检查项 | 结果 |
+|---|---|
+| PHPUnit 全量 | **OK（87 tests, 378 assertions）**，7.5s |
+| PHPStan level 5（PHP 8.5.4） | **[OK] No errors** |
+| php-cs-fixer | **0 需修复**（49 files） |
+| 端到端 `wsl-e2e.sh` | start 200 → status pid 424 → **reload 真实 respawn（424→442）** → **SIGTERM 优雅停机** 全通过 |
+| 基准 `wsl-bench.sh` | `/` **13887 QPS**、`/demo/db` **2940**、`/demo/redis` **5871**，全部 `errors:0` |
+
+基准后池指标（验证 C12 零泄漏声称）：
+
+```json
+"db":    { "size": 20, "active": 0, "idle": 20, "total_timeouts": 0, "total_discarded": 0 }
+"redis": { "size": 20, "active": 0, "idle": 20 }
+```
 
 新增/调整的测试：
 

@@ -78,7 +78,7 @@ class HttpServerWatchTest extends TestCase
                 // stop the server and raise the reload flag.
                 file_put_contents($this->watchDir . '/changed.php', '<?php return 3;');
                 $deadline = microtime(true) + 5;
-                while (microtime(true) < $deadline && $server->isRunning()) {
+                while ($server->isRunning() && microtime(true) < $deadline) {
                     Coroutine::sleep(0.1);
                 }
 

@@ -90,11 +90,11 @@ final class PidFile
     }
 
     /**
-     * Cross-platform process liveness check.
+     * Process liveness check (Linux/macOS).
      *
-     * posix_kill() is preferred: the swoole-cli Windows builds (cygwin/msys2)
-     * expose their own pid space through the posix extension and cannot exec
-     * external programs. On plain Windows PHP the tasklist fallback is used.
+     * posix_kill() is the primary mechanism (available in PHP by default on
+     * both); EPERM (1) means the process exists but is not ours. The /proc
+     * check is a fallback for Linux installs without the posix extension.
      */
     public static function isProcessAlive(int $pid): bool
     {
@@ -104,17 +104,6 @@ final class PidFile
             }
             // EPERM (1) means the process exists but is not ours.
             return posix_get_last_error() === 1;
-        }
-
-        if (PHP_OS_FAMILY === 'Windows') {
-            exec(sprintf('tasklist /FI "PID eq %d" /NH 2>NUL', $pid), $output);
-            foreach ($output as $line) {
-                if (preg_match('/\s' . $pid . '\s/', $line) === 1) {
-                    return true;
-                }
-            }
-
-            return false;
         }
 
         return file_exists('/proc/' . $pid);

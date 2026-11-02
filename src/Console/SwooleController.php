@@ -33,11 +33,15 @@ class SwooleController extends Controller
 
     public ?int $port = null;
 
+    /** @var bool development-only: watch application files and auto-reload
+     *  the server when they change (`swoole/start --watch`) */
+    public bool $watch = false;
+
     private ?HttpServer $server = null;
 
     public function options($actionID): array
     {
-        return array_merge(parent::options($actionID), ['serverComponent', 'host', 'port']);
+        return array_merge(parent::options($actionID), ['serverComponent', 'host', 'port', 'watch']);
     }
 
     public function optionAliases(): array
@@ -46,6 +50,7 @@ class SwooleController extends Controller
             'c' => 'serverComponent',
             'H' => 'host',
             'p' => 'port',
+            'w' => 'watch',
         ]);
     }
 
@@ -88,11 +93,16 @@ class SwooleController extends Controller
         }
 
         $this->stdout(sprintf(
-            "Swoole HTTP server listening on %s:%d (pid: %d)\n",
+            "Swoole HTTP server listening on %s:%d (pid: %d)%s\n",
             $server->host,
             $server->port,
-            getmypid()
+            getmypid(),
+            $this->watch ? ' [watch mode]' : ''
         ));
+
+        if ($this->watch) {
+            $server->watch = true;
+        }
 
         try {
             $server->start();
@@ -101,6 +111,19 @@ class SwooleController extends Controller
         }
 
         $this->stdout("Swoole HTTP server stopped.\n");
+
+        // Watch mode: the watchdog requested this shutdown after detecting
+        // file changes - respawn with the same command line so the new
+        // process loads the fresh code (dev convenience only).
+        if ($this->watch && $server->watchReloadPending) {
+            $command = array_values($_SERVER['argv'] ?? []);
+            if ($command !== [] && $this->respawn($command)) {
+                $this->stdout("Respawned with fresh code.\n");
+                return ExitCode::OK;
+            }
+            $this->stderr("Could not respawn automatically; start again manually.\n");
+            return ExitCode::UNSPECIFIED_ERROR;
+        }
 
         return ExitCode::OK;
     }
@@ -171,6 +194,128 @@ class SwooleController extends Controller
             $this->stdout("Start it again with: " . implode(' ', $command) . "\n");
         }
         return ExitCode::OK;
+    }
+
+    /**
+     * Validates the application configuration the Swoole server will use:
+     * server wiring, runtime paths, and the web app config (read statically
+     * from the dispatcher's config file - `swoole/check` runs in the console
+     * application, whose components are not the web ones). Component
+     * reachability is probed through temporary connections built from the
+     * config definitions, outside any coroutine (detached mode).
+     */
+    public function actionCheck(): int
+    {
+        $server = $this->resolveServer(false);
+        $failures = 0;
+        $report = static function (bool $ok, string $message) use (&$failures): void {
+            if (!$ok) {
+                $failures++;
+            }
+            printf("  [%s] %s\n", $ok ? ' OK ' : 'FAIL', $message);
+        };
+
+        printf("Swoole configuration check (%s):\n", $this->serverComponent);
+
+        // --- server component wiring ---
+        if ($server === null) {
+            $report(false, "server component '{$this->serverComponent}' is not defined");
+            printf("\n%d failure(s).\n", $failures);
+            return ExitCode::UNSPECIFIED_ERROR;
+        }
+        $report(true, sprintf('server component "%s" resolved (%s:%d)', $this->serverComponent, $server->host, $server->port));
+
+        // --- runtime paths writable ---
+        $pidDir = dirname($server->getPidFile()->getPath());
+        $report(is_dir($pidDir) && is_writable($pidDir), sprintf('pid file directory writable: %s', $pidDir));
+
+        // --- dispatcher app config ---
+        $dispatcher = $server->dispatcher;
+        $appConfig = $dispatcher instanceof \Yii2S\Swoole\Server\RequestDispatcher
+            ? $dispatcher->appConfig
+            : null;
+        if (!is_string($appConfig) || !is_file($appConfig)) {
+            $report(
+                false,
+                $appConfig !== null
+                    ? sprintf('app config file missing: %s', $appConfig)
+                    : 'dispatcher is not a file-based RequestDispatcher; skipping web config checks'
+            );
+            printf("\n%d failure(s).\n", $failures);
+
+            return $failures === 0 ? ExitCode::OK : ExitCode::UNSPECIFIED_ERROR;
+        }
+        $report(true, sprintf('app config file: %s', $appConfig));
+
+        $webConfig = require $appConfig;
+        if (!is_array($webConfig)) {
+            $report(false, 'app config file does not return an array');
+            printf("\n%d failure(s).\n", $failures);
+
+            return ExitCode::UNSPECIFIED_ERROR;
+        }
+        $components = $webConfig['components'] ?? [];
+
+        // --- web request requirements ---
+        $requestDef = $components['request'] ?? null;
+        $key = is_array($requestDef) ? ($requestDef['cookieValidationKey'] ?? '') : null;
+        $report(
+            is_string($key) && $key !== '',
+            $key === null
+                ? 'no request component configured'
+                : 'request.cookieValidationKey is configured'
+        );
+
+        // --- pretty URL requirement ---
+        $urlDef = $components['urlManager'] ?? null;
+        $pretty = is_array($urlDef) ? ($urlDef['enablePrettyUrl'] ?? false) : false;
+        $report(
+            (bool) $pretty,
+            $urlDef === null
+                ? 'no urlManager component configured (pretty routing must be on)'
+                : 'urlManager.enablePrettyUrl = true (required: ?r= routing relies on $_GET)'
+        );
+
+        // --- db reachability through a temporary connection ---
+        $dbDef = $components['db'] ?? null;
+        if ($dbDef === null) {
+            printf("  [SKIP] no db component configured\n");
+        } else {
+            try {
+                /** @var \yii\db\Connection $db */
+                $db = Yii::createObject($dbDef);
+                $value = $db->createCommand('SELECT 1')->queryScalar();
+                $report($value !== false, 'db reachable (SELECT 1)');
+                $db->close();
+            } catch (\Throwable $e) {
+                $report(false, 'db unreachable: ' . substr($e->getMessage(), 0, 90));
+            }
+        }
+
+        // --- redis reachability through a temporary connection ---
+        $redisDef = $components['redis'] ?? null;
+        if ($redisDef === null) {
+            printf("  [SKIP] no redis component configured\n");
+        } else {
+            try {
+                /** @var \Yii2S\Swoole\Redis\CoroutineRedisConnection $redis */
+                $redis = Yii::createObject($redisDef);
+                $pong = $redis->executeCommand('PING');
+                // phpredis returns true for PING; other clients return the
+                // literal '+PONG'/'PONG' string.
+                $report(
+                    $pong === true || strcasecmp((string) $pong, 'PONG') === 0,
+                    'redis reachable (PING)'
+                );
+                $redis->close();
+            } catch (\Throwable $e) {
+                $report(false, 'redis unreachable: ' . substr($e->getMessage(), 0, 90));
+            }
+        }
+
+        printf("\n%s\n", $failures === 0 ? 'All checks passed.' : sprintf("%d failure(s).\n", $failures));
+
+        return $failures === 0 ? ExitCode::OK : ExitCode::UNSPECIFIED_ERROR;
     }
 
     /**
@@ -275,8 +420,9 @@ class SwooleController extends Controller
     /**
      * Respawns the server detached from the current process using the original
      * command line. Returns false when process spawning is unavailable (some
-     * systems restrict exec/popen/proc_open from PHP); the caller then tells
-     * the user to start the server manually.
+     * systems restrict exec/proc_open from PHP); the caller then tells the
+     * user to start the server manually. On production Linux a process
+     * manager (supervisor/systemd) is the preferred respawn path.
      *
      * The stored command is the script invocation without the interpreter
      * (e.g. `example/yii swoole/start`), so PHP_BINARY is prepended - the
@@ -293,17 +439,6 @@ class SwooleController extends Controller
 
         set_error_handler(static fn (): bool => true);
         try {
-            if (PHP_OS_FAMILY === 'Windows') {
-                $process = @popen('start /B "" ' . $commandLine, 'r');
-                if (is_resource($process)) {
-                    pclose($process);
-                    return true;
-                }
-                return false;
-            }
-
-            // cygwin/msys2 builds report PHP_OS_FAMILY as 'Unknown'/'Linux'
-            // but exec() may fail to fork; detect it via the exit code.
             exec($commandLine . ' > /dev/null 2>&1 &', $output, $exitCode);
 
             return $exitCode === 0;

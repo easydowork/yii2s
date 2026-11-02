@@ -50,9 +50,29 @@ class HttpServer extends Component
     /** @var string|null stop flag file path; null resolves next to the pid file */
     public $stopFlagFile = null;
 
-    /** @var bool whether to poll the stop flag file (required for graceful
-     *  shutdown on Windows, where signals cannot cross process boundaries) */
+    /** @var bool whether to poll the stop flag file - a stop mechanism that
+     *  works from any process (e.g. `swoole/stop` from a separate console)
+     *  without depending on signal permissions */
     public bool $enableStopFlagWatcher = true;
+
+    /** @var bool development-only: watch application files and gracefully
+     *  reload the server when they change. NEVER enable in production -
+     *  the reload respawns the whole process. */
+    public bool $watch = false;
+
+    /** @var float seconds between watch scans (mtime polling, zero deps) */
+    public float $watchInterval = 0.5;
+
+    /** @var array<string> extra directories to watch (Yii aliases); defaults
+     *  to @app when empty */
+    public array $watchDirs = [];
+
+    /** @var array<string> directory names skipped by the watch scan */
+    public array $watchExcludes = ['runtime', 'vendor', 'node_modules', '.git'];
+
+    /** @var bool set when the *watchdog* (not an external `swoole/reload`)
+     *  requested the current shutdown; consumed by `swoole/start --watch` */
+    public bool $watchReloadPending = false;
 
     /** @var string|null static file root directory (supports Yii aliases);
      *  when set, Swoole serves existing files directly and missing paths
@@ -240,6 +260,9 @@ class HttpServer extends Component
         if ($this->enableStopFlagWatcher) {
             $this->startStopFlagWatcher();
         }
+        if ($this->watch) {
+            $this->startWatchdog();
+        }
 
         $server->handle('/', static function (
             \Swoole\Http\Request $request,
@@ -312,20 +335,110 @@ class HttpServer extends Component
                 });
             }
         } catch (\Throwable $e) {
-            // Signal handling is not available on every platform; the server
-            // still works, it just cannot shut down gracefully. On Windows the
-            // stop flag watcher provides the graceful path instead.
+            // Signal handling may be unavailable (pcntl missing); the server
+            // still works, it just cannot shut down gracefully. The stop flag
+            // watcher provides the graceful path in that case.
         }
     }
 
     /**
-     * Watches for the stop flag file, which is the only reliable cross-process
-     * shutdown mechanism on Windows (signals cannot cross process boundaries
-     * there). The flag carries the requested action ('stop' or 'reload').
+     * Development-only hot reload: polls watched directories for PHP file
+     * changes and triggers a graceful shutdown marked as a watchdog reload.
+     * `swoole/start --watch` consumes [[watchReloadPending]] afterwards and
+     * respawns itself, so the new process picks up the fresh code.
      *
-     * Implemented as a coroutine polling loop: Swoole\Timer is not available
-     * on the Windows (cygwin) build, and shutdown() must not be called from
-     * a timer callback anyway.
+     * Plain mtime polling (no inotify/fswatch dependency) works identically
+     * on Linux and macOS; the stat() calls are coroutine-hooked (HOOK_FILE),
+     * so scanning never blocks the event loop.
+     */
+    private function startWatchdog(): void
+    {
+        Coroutine::create(function (): void {
+            $snapshot = $this->scanWatchFiles();
+            while ($this->isRunning && !$this->stopRequested) {
+                Coroutine::sleep($this->watchInterval);
+                $current = $this->scanWatchFiles();
+                if ($current !== $snapshot) {
+                    $this->stdout(sprintf(
+                        "[%s] file change detected, reloading...\n",
+                        date('H:i:s')
+                    ));
+                    $this->watchReloadPending = true;
+                    $this->stop();
+                    return;
+                }
+                $snapshot = $current;
+            }
+        });
+    }
+
+    /**
+     * @return array<string, int> path => mtime snapshot of watched PHP files
+     */
+    private function scanWatchFiles(): array
+    {
+        $dirs = $this->watchDirs;
+        if ($dirs === []) {
+            $appAlias = Yii::getAlias('@app', false);
+            if (!is_string($appAlias)) {
+                return [];
+            }
+            $dirs = [$appAlias];
+        }
+
+        $snapshot = [];
+        foreach ($dirs as $dir) {
+            if (!is_dir($dir)) {
+                continue;
+            }
+            // The scan runs concurrently with active requests and dev tools
+            // writing files; every filesystem access may hit a file that
+            // vanished (or a warning that Yii's error handler escalates into
+            // an ErrorException mid-request). Never let it fail.
+            try {
+                $iterator = new \RecursiveIteratorIterator(
+                    new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS),
+                    \RecursiveIteratorIterator::LEAVES_ONLY
+                );
+                /** @var \SplFileInfo $file */
+                foreach ($iterator as $file) {
+                    if ($file->getExtension() !== 'php') {
+                        continue;
+                    }
+                    $path = $file->getPathname();
+                    $excluded = false;
+                    foreach ($this->watchExcludes as $name) {
+                        if (str_contains($path, DIRECTORY_SEPARATOR . $name . DIRECTORY_SEPARATOR)) {
+                            $excluded = true;
+                            break;
+                        }
+                    }
+                    if (!$excluded) {
+                        $snapshot[$path] = (int) @filemtime($path);
+                    }
+                }
+            } catch (\Throwable) {
+                continue; // unreadable directory: skip it this round
+            }
+        }
+
+        ksort($snapshot);
+
+        return $snapshot;
+    }
+
+    private function stdout(string $message): void
+    {
+        fwrite(STDOUT, $message);
+    }
+
+    /**
+     * Watches for the stop flag file - the cross-process shutdown mechanism
+     * used by `swoole/stop` and `swoole/reload` from a separate console
+     * process. The flag carries the requested action ('stop' or 'reload').
+     *
+     * Implemented as a coroutine polling loop: shutdown() must not be called
+     * from a timer callback (it blocks).
      */
     private function startStopFlagWatcher(): void
     {

@@ -22,7 +22,12 @@ echo "after reload: $(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http:/
 $CLI example/yii swoole/status --port=9601
 
 echo "=== 4. SIGTERM graceful ==="
-SERVER_PID=$($CLI -r '$d=json_decode(file_get_contents("'"$HOME"'/yii2s/example/runtime/swoole-server.pid"),true); echo $d["pid"];')
+PIDFILE="/tmp/yii2s-swoole-127.0.0.1-9601.pid"
+SERVER_PID=$($CLI -r '$d=json_decode(file_get_contents($argv[1]), true); echo (is_array($d) && isset($d["pid"])) ? $d["pid"] : "";' "$PIDFILE")
+if [ -z "$SERVER_PID" ]; then
+  echo "FAILED to read server pid from $PIDFILE"
+  exit 1
+fi
 kill -TERM "$SERVER_PID"
 sleep 3
 CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:9601/)

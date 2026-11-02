@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Development hot reload**: `swoole/start --watch` polls application PHP
+  files (mtime, 0.5s, zero dependencies) and gracefully reloads the server
+  on change - the new process picks up fresh code within a second while
+  in-flight requests drain. Tunables: `watchDirs`, `watchInterval`,
+  `watchExcludes`. Dev-only; respawns the whole process.
+- **`swoole/check` configuration doctor**: statically reads the web app
+  config (from the dispatcher's file) and validates cookieValidationKey /
+  prettyUrl / pid directory writability, then probes db (`SELECT 1`) and
+  redis (`PING`) through temporary connections. Failures surface in
+  development instead of on the first production request.
+- **Lifecycle slots documented** (`EVENT_BEFORE_START` / `EVENT_AFTER_START`
+  / `EVENT_AFTER_STOP`): the official mount point for periodic tasks and
+  other long-lived coroutine features - worked example in doc/ROADMAP.md.
+- **doc/ROADMAP.md**: connection-pool expansion plan (PostgreSQL P1,
+  RabbitMQ P2 with producer-pool/consumer-exclusive shapes, Kafka assessed
+  not coroutine-suitable) on top of the generic factory/validator/destroyer
+  pool.
+
 ### Fixed
 
 - **Multipart uploads depended on the Swoole build**: `Coroutine\Http\Server`

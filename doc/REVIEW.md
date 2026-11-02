@@ -19,34 +19,30 @@
 
 ## 2. 十分钟复现路径（按序执行）
 
-代码已就绪，以下命令全部可直接执行：
+**目标平台为 Linux**（生产环境 Linux；Windows 机器仅作预构建，一切验证在 WSL Ubuntu 内完成）。
+以下命令在 WSL Ubuntu 26.04 内直接执行：
 
 ```bash
-# === A. Windows 侧（PowerShell，swoole-cli 为独立二进制无需安装） ===
-cd D:\EServer-data\www\yii2s
-D:\swoole-cli-v6.2.2-msys2-x64\bin\swoole-cli.exe vendor/phpunit/phpunit/phpunit --no-coverage
-# 期望: OK (68 tests, 237 assertions)
+# === A. 全量测试（两条运行时线） ===
+cd ~/yii2s
+/usr/local/bin/swoole-cli vendor/phpunit/phpunit/phpunit --no-coverage
+# 期望: OK (87 tests, 378 assertions)  [swoole-cli 6.2.2 构建]
 
-D:\EServer-data\childApp\php\php-8.4\php.exe vendor/phpstan/phpstan/phpstan analyse --no-progress
-# 期望: [OK] No errors (level 5)
+php vendor/phpunit/phpunit/phpunit --no-coverage
+# 期望: OK（标准 pecl 构建: PHP 8.5 + swoole 6.2.4，CI 同源；需先按
+# DEVELOPMENT.md 验证状态一节安装，扩展默认 http_parse_files=false）
 
-# === B. 端到端（Windows） ===
-D:\swoole-cli-v6.2.2-msys2-x64\bin\swoole-cli.exe example/yii swoole/start
-# 另开终端：
-curl http://127.0.0.1:9501/                       # 200 JSON
-curl http://127.0.0.1:9501/demo/db                # 200（MySQL 连接池）
-curl http://127.0.0.1:9501/demo/redis             # 200
-curl -I http://127.0.0.1:9501/css/style.css       # 200 text/css（静态文件）
-curl http://127.0.0.1:9501/__pool                 # 池指标（已开启）
-D:\swoole-cli-v6.2.2-msys2-x64\bin\swoole-cli.exe example/yii swoole/stop
+# === B. 静态分析（Windows 预构建机执行，纯 PHP 工具链） ===
+# php vendor/phpstan/phpstan/phpstan analyse --no-progress   # 期望: No errors (level 5)
 
-# === C. Linux 侧（WSL2 Ubuntu 26.04，原生 swoole-cli） ===
-wsl -- bash ~/yii2s/scripts/wsl-e2e.sh     # start/status/reload真实respawn/SIGTERM 全链路
-wsl -- bash ~/yii2s/scripts/wsl-bench.sh   # 基准: 13706 QPS(纯框架) 零错误
+# === C. 端到端 ===
+bash ~/yii2s/scripts/wsl-e2e.sh     # start/status/reload真实respawn/SIGTERM 全链路
+bash ~/yii2s/scripts/wsl-bench.sh   # 基准: 13706 QPS(纯框架) 零错误
 ```
 
 依赖说明：测试需要本机 MySQL（库名 yii2s_demo）与 Redis，配置在 `phpunit.xml.dist` 的
-PHP 常量。Windows 侧服务需先启动（`D:\EServer-data\childApp\server\` 下）。
+PHP 常量。MySQL/Redis 运行在 Windows 宿主侧（WSL mirrored 网络以 127.0.0.1 直连），
+服务需先启动（`D:\EServer-data\childApp\server\` 下）。
 
 ## 3. 声称事实清单（欢迎证伪）
 

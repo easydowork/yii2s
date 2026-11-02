@@ -24,7 +24,9 @@
             <directory>./tests/log</directory>
             <directory>./tests/runtime</directory>
             <directory>./tests/server</directory>
-        </testsuite>
+            <directory>./tests/console</directory>
+            <directory>./tests/web</directory>
+            </testsuite>
     </testsuites>
 
     <coverage>

@@ -47,14 +47,21 @@
 
 ### 验证状态
 
-- **Windows**：msys2（Swoole 6.2.2，主力）+ cygwin（6.1.7，兼容基线）双运行时全量测试；
-  example 全端点、四条服务器命令、压测端到端实测
-- **Linux**：WSL2 Ubuntu 26.04 + 原生 swoole-cli（6.2.2）——全量测试 68/237 全绿、
-  端到端（start/status/reload 真实 respawn/SIGTERM 优雅停机）实测通过、真实基准数据见上节。
-  `scripts/wsl-e2e.sh` 与 `scripts/wsl-bench.sh` 可在任意 Linux 复跑。
-  Windows 侧服务（MySQL/Redis）通过 WSL mirrored 网络模式（`%USERPROFILE%\.wslconfig` 设
-  `networkingMode=mirrored`）共享 localhost，测试配置零修改
-- **CI**：GitHub Actions（Linux + pecl swoole 矩阵）已配置，待仓库推送后首次真实运行
+**目标平台：Linux（生产）；macOS（计划中的开发机）。Windows 机器仅作预构建，
+一切测试验证在 WSL Ubuntu 内完成，代码中不含 Windows 分支。**
+
+- **WSL2 Ubuntu 26.04（唯一测试环境）**——两条运行时线，各 87 tests / 378 assertions 全绿：
+  1. 原生 swoole-cli（6.2.2）：端到端（start/status/reload 真实 respawn/SIGTERM 优雅
+     停机）实测通过、真实基准数据见上节；`scripts/wsl-e2e.sh` 与 `scripts/wsl-bench.sh`
+     可复跑
+  2. 标准 PHP 8.5 + `pecl install swoole`（6.2.4）——本机复刻 CI 矩阵的标准构建
+     （`http_parse_files` 显式修复正是在此构建上得到验证：pecl 构建遵循源码默认
+     false，未修复时上传测试必挂）。复现：`apt install php-cli php-dev php-mysql
+     php-xml php-mbstring php-curl php-redis php-pear build-essential libbrotli-dev
+     libssl-dev zlib1g-dev pkg-config` + `pecl install swoole` + 启用扩展
+- **静态分析**：Windows 预构建机上跑 phpstan/cs-fixer（纯 PHP 工具链，与运行时无关）
+- **CI**：GitHub Actions（Linux + setup-php 的 pecl swoole 矩阵）已配置——与 pecl
+  验证线同源；待仓库推送后首跑
 - **压测**：见「五点五、压测基准」——Linux 纯框架 13706 QPS（p50 7.2ms）
 
 ---
