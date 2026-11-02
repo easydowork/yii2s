@@ -286,9 +286,22 @@ class CoroutineRequest extends Request
         return '';
     }
 
+    public function getBaseUrl(): string
+    {
+        // Explicit empty base: the application sits at the domain root and
+        // URLs must not carry a script-name prefix. The parent derives this
+        // from dirname(getScriptUrl()), which yields "." for an empty script
+        // URL and makes every published asset URL relative - "./assets/..."
+        // breaks on any nested page (e.g. /admin/default/login resolves the
+        // asset to /admin/default/assets/...). Asset URLs must be rooted.
+        return '';
+    }
+
     public function getScriptFile(): string
     {
-        return '';
+        // Real path (basic-app convention): feeds Yii's '@webroot' alias so
+        // AssetManager::publish targets <app>/web/assets like under FPM.
+        return Yii::getAlias('@app') . '/web/index.php';
     }
 
     public function getUrl(): string

@@ -18,7 +18,7 @@
 
 | 依赖 | 版本 |
 |---|---|
-| PHP | >= 8.1（实测 8.4 / 8.5） |
+| PHP | >= 8.2（实测 8.4 / 8.5；Swoole 6 的 PHP 下限即 8.2） |
 | ext-swoole | ^6.0（协程 Http Server + 连接池） |
 | yiisoft/yii2 | ^2.0 |
 | MySQL / Redis | 可选，按使用的组件而定 |
@@ -31,7 +31,7 @@
 ## 安装
 
 ```bash
-composer require yii2s/yii2-swoole
+composer require easydowork/yii2s
 ```
 
 发布 Packagist 前可通过 path 仓库引入：

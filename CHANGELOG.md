@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`examples/blog/`**: a complete real-world scenario — classic MVC front
+  pages, an authenticated admin panel (CSRF + Redis-backed sessions +
+  `data-method` CRUD links), a JSON REST API consumed by a Vue3 SPA,
+  migrations and seed data — running unmodified under
+  `swoole/start --watch`. Doubles as the integration fixture that surfaced
+  the `@webroot` and asset-URL issues fixed below.
+
 ### Changed
 
 - **Documentation consolidated into a single `doc/DEVELOPMENT.md`** (the

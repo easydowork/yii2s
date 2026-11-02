@@ -1,5 +1,5 @@
 {
-    "name": "yii2s/yii2-swoole",
+    "name": "easydowork/yii2s",
     "description": "Swoole 6 coroutine accelerator for Yii2: resident-memory HTTP server, connection pools, coroutine-safe DB/Redis/Cache/Session components.",
     "keywords": [
         "yii2",
@@ -12,7 +12,7 @@
     "type": "yii2-extension",
     "license": "MIT",
     "require": {
-        "php": ">=8.1",
+        "php": ">=8.2",
         "ext-swoole": "^6.0",
         "yiisoft/yii2": "^2.0"
     },
@@ -21,6 +21,7 @@
         "phpstan/phpstan": "^2.1",
         "phpstan/phpstan-phpunit": "^2.0",
         "swoole/ide-helper": "^6.0",
+        "yiisoft/yii2-redis": "^2.0",
         "yidas/yii2-composer-bower-skip": "^2.0",
         "friendsofphp/php-cs-fixer": "3.95"
     },

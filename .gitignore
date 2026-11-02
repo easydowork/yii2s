@@ -13,3 +13,4 @@ cookies.txt
 # repo entirely; drop the folders into doc/references/ when needed locally
 # (Yii2 framework sources, Swoole docs/source, prior-art extensions).
 /doc/references/
+/demo

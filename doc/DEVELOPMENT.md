@@ -24,7 +24,7 @@
 
 | 依赖 | 版本 |
 |---|---|
-| PHP | >= 8.1（实测 8.4 / 8.5） |
+| PHP | >= 8.2（实测 8.4 / 8.5；Swoole 6 的 PHP 下限即 8.2） |
 | ext-swoole | ^6.0（协程 Http Server + 连接池） |
 | yiisoft/yii2 | ^2.0 |
 | MySQL / Redis | 可选，按使用的组件而定 |
@@ -183,6 +183,21 @@ php yii queue/serve [--limit=N]                     # 队列消费 worker（无�
    `swoole/start --watch`）；opcache 的时间戳校验在常驻进程里对**已加载的类**无效。
 8. **阻塞扩展与长 CPU 循环** —— Swoole hook 覆盖常见阻塞（PDO/Redis/文件/stream/sleep），
    但 C 扩展直连（librdkafka 等）与纯 CPU 密集计算会卡住事件循环——挪队列或独立进程。
+
+### 资产与布局（真实场景教训：一个遗漏就是 405/404）
+
+- **布局必须含标准五件套**：`beginPage()/head()/beginBody()/endBody()/endPage()`——
+  资产标签、csrf meta 都在这些钩子里输出；**漏一个**，`Html::a(..., ['data-method' => 'post'])`
+  的删除/登出链接会以 GET 发出（yii.js 未加载）撞 VerbFilter 405，且 AssetManager 无法发布。
+- **`YiiAsset::register($this)` 必须在布局调用**——`yii.js` 提供 `data-method`/`data-confirm`。
+- **AssetManager 的两个路径语义分离**：`basePath`（文件系统，`@app/web/assets`）与
+  `baseUrl`（URL，显式 `'/assets'`）。`@web` 为空串时 `'@web/assets'` 解析成 `/assets`
+  （根路径）——**显式配置是最可控的写法**。
+- **`@bower`/`@npm` 别名**：使用 `yidas/yii2-bower-asset` 时需显式注册
+  `'@bower' => '@vendor/yidas/yii2-bower-asset/bower'`（真实资产在包内目录，不在
+  `vendor/bower-asset`）。
+- 完整可运行的参照：仓库 `examples/blog/`（传统 MVC 后台 + Vue3 前后端分离 + 迁移 +
+  热重载开发流）。
 
 ### 放心用（已验证原生可用）
 
@@ -621,6 +636,13 @@ $pool = new ConnectionPool(
     `$server->isRunning` vs `isRunning()`——症状是 Coroutine\run 不退出，先查属性访问。
 29. **Swoole 构建间的默认值差异是隐性炸弹**（`http_parse_files` 一例）——
     依赖外部默认值的行为一律显式声明。
+30. **path repo 的 symlink 会被依赖操作悄悄弄丢** —— `composer update --with-all-dependencies`
+    重建 vendor 后 path 包目录可能变空，且空目录让 composer 误判"已安装"而跳过重装；
+    `rm -rf vendor/<vendor> && composer install` 重建。开发期用 `--watch` 每日确认包更新生效。
+31. **`pkill -f` 会匹配自己的命令行** —— 模式里用 `[s]` 正则技巧（`pkill -f "[s]woole-cli"`）
+    防自杀；验证脚本**必须**以停服结尾（或 setsid 脱离），否则常驻服务器让 WSL 会话永不返回。
+32. **WSL 的 /tmp 随实例重启清空** —— 日志/pid 落 `$HOME`；PowerShell 写文件默认带 UTF-8 BOM
+    且多轮写入会交错损坏配置——重要配置用单一来源重写并 `php -l` + 键断言验证。
 
 ---
 

@@ -134,11 +134,14 @@ class Bootstrap implements BootstrapInterface
     private function registerConsoleControllers(ConsoleApplication $app): void
     {
         if (!isset($app->controllerMap['swoole'])) {
-            if (!$app->has($this->componentId)) {
-                // Console-only application (no web config next to it): register
-                // a bare server component so the commands at least resolve and
-                // produce a meaningful error instead of a missing component.
-                $app->set($this->componentId, ['class' => Server\HttpServer::class]);
+            if (!$app->has($this->componentId) && !isset($app->components[$this->componentId])) {
+                // Prefer the web application's server definition so console
+                // commands address the very same server (documentRoot,
+                // dispatcher, watch settings...). Fall back to a bare
+                // component for console-only applications, where the
+                // HttpServer dispatcher default will produce a meaningful
+                // error instead of a missing component.
+                $app->set($this->componentId, $this->webServerDefinition() ?? ['class' => Server\HttpServer::class]);
             }
             $app->controllerMap['swoole'] = [
                 'class' => Console\SwooleController::class,
@@ -152,5 +155,27 @@ class Bootstrap implements BootstrapInterface
                 'queueComponent' => $this->queueComponentId,
             ];
         }
+    }
+
+    /**
+     * The `swooleHttpServer` component definition from the web application
+     * config (when that file exists next to @app/config), or null. Reading
+     * it is safe: the server process already requires this file twice.
+     */
+    private function webServerDefinition(): ?array
+    {
+        $webConfig = Yii::getAlias('@app/config/web.php', false);
+        if (!is_string($webConfig) || !is_file($webConfig)) {
+            return null;
+        }
+
+        $config = require $webConfig;
+        if (!is_array($config)) {
+            return null;
+        }
+
+        $definition = $config['components'][$this->componentId] ?? null;
+
+        return is_array($definition) ? $definition : null;
     }
 }

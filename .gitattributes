@@ -10,4 +10,6 @@
 /tests          export-ignore
 /scripts        export-ignore
 /example        export-ignore
+/examples       export-ignore
 /.github        export-ignore
+/examples/blog/yii text eol=lf
