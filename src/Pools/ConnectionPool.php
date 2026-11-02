@@ -44,6 +44,32 @@ class ConnectionPool
 
     private bool $closed = false;
 
+    private int $totalCreated = 0;
+
+    private int $totalBorrowed = 0;
+
+    private int $totalTimeouts = 0;
+
+    private int $totalDiscarded = 0;
+
+    private int $waiting = 0;
+
+    /**
+     * Borrowed connections indexed by spl_object_id, each holding the
+     * connection and the coroutine id that borrowed it. [[sweep()]] uses the
+     * mapping to reclaim connections whose borrowing coroutine died without
+     * returning them (e.g. sub-coroutines whose connections nobody releases
+     * explicitly).
+     *
+     * Note: a plain array is used deliberately - WeakMap writes performed in
+     * child coroutines are not visible in other coroutines on the Windows
+     * (msys2) swoole-cli build, which both breaks the tracking and crashes
+     * the process.
+     *
+     * @var array<int, array{0: object, 1: int}>
+     */
+    private array $borrowed = [];
+
     /**
      * @param int $maxActive maximum number of connections managed by the pool
      * @param float $waitTimeout seconds to wait for a free connection before failing
@@ -84,41 +110,100 @@ class ConnectionPool
         $connection = $this->channel->pop(0.001);
         if ($connection !== false) {
             if ($this->isValid($connection)) {
+                $this->totalBorrowed++;
+                $this->trackBorrow($connection);
                 return $connection;
             }
             $this->discard($connection);
         }
 
         if ($this->size < $this->maxActive) {
-            return $this->create();
+            $connection = $this->create();
+            $this->totalBorrowed++;
+            $this->trackBorrow($connection);
+            return $connection;
         }
 
         // Pool exhausted: wait for a returned connection.
-        $deadline = microtime(true) + $this->waitTimeout;
-        while (true) {
-            $remaining = $deadline - microtime(true);
-            if ($remaining <= 0) {
-                throw new \RuntimeException(sprintf(
-                    'Connection pool exhausted: max %d active connections, waited %.2fs.',
-                    $this->maxActive,
-                    $this->waitTimeout
-                ));
-            }
+        $this->waiting++;
+        try {
+            $deadline = microtime(true) + $this->waitTimeout;
+            while (true) {
+                $remaining = $deadline - microtime(true);
+                if ($remaining <= 0) {
+                    $this->totalTimeouts++;
+                    throw new \RuntimeException(sprintf(
+                        'Connection pool exhausted: max %d active connections, waited %.2fs.',
+                        $this->maxActive,
+                        $this->waitTimeout
+                    ));
+                }
 
-            $connection = $this->channel->pop($remaining);
-            if ($connection === false) {
-                continue;
-            }
+                $connection = $this->channel->pop($remaining);
+                if ($connection === false) {
+                    continue;
+                }
 
-            if ($this->isValid($connection)) {
-                return $connection;
-            }
+                if ($this->isValid($connection)) {
+                    $this->totalBorrowed++;
+                    $this->trackBorrow($connection);
+                    return $connection;
+                }
 
-            $this->discard($connection);
-            if ($this->size < $this->maxActive) {
-                return $this->create();
+                $this->discard($connection);
+                if ($this->size < $this->maxActive) {
+                    $connection = $this->create();
+                    $this->totalBorrowed++;
+                    $this->trackBorrow($connection);
+                    return $connection;
+                }
             }
+        } finally {
+            $this->waiting--;
         }
+    }
+
+    /**
+     * Marks the connection as borrowed by the current coroutine.
+     */
+    private function trackBorrow(object $connection): void
+    {
+        $this->borrowed[spl_object_id($connection)] = [$connection, \Swoole\Coroutine::getCid()];
+    }
+
+    /**
+     * Reclaims connections whose borrowing coroutine is gone.
+     *
+     * Sub-coroutines may borrow connections into their own context (every
+     * Yii2 DB query does); when such a coroutine dies, nothing releases its
+     * connection and it would leak forever. The request manager calls this
+     * after every request; destroyed connections are rebuilt on demand, so
+     * correctness is preferred over reuse here.
+     *
+     * @return int number of reclaimed connections
+     */
+    public function sweep(): int
+    {
+        $alive = [];
+        foreach (\Swoole\Coroutine::listCoroutines() as $cid) {
+            $alive[$cid] = true;
+        }
+
+        $reclaimed = 0;
+        foreach ($this->borrowed as $id => [$connection, $cid]) {
+            if (isset($alive[$cid])) {
+                continue; // borrower still alive and owns the connection
+            }
+
+            unset($this->borrowed[$id]);
+            if ($this->size > 0) {
+                $this->size--;
+            }
+            $this->totalDiscarded++;
+            $reclaimed++;
+        }
+
+        return $reclaimed;
     }
 
     /**
@@ -126,6 +211,7 @@ class ConnectionPool
      */
     public function return(object $connection): void
     {
+        unset($this->borrowed[spl_object_id($connection)]);
         if ($this->closed || !$this->channel->push($connection)) {
             $this->destroy($connection);
         }
@@ -136,6 +222,7 @@ class ConnectionPool
      */
     public function discard(object $connection): void
     {
+        unset($this->borrowed[spl_object_id($connection)]);
         if ($this->destroyer !== null) {
             try {
                 ($this->destroyer)($connection);
@@ -146,6 +233,7 @@ class ConnectionPool
         if ($this->size > 0) {
             $this->size--;
         }
+        $this->totalDiscarded++;
     }
 
     /**
@@ -193,11 +281,36 @@ class ConnectionPool
         return $this->closed;
     }
 
+    /**
+     * Current pool metrics, for the debug endpoint and monitoring.
+     *
+     * @return array<string, int|bool>
+     */
+    public function getMetrics(): array
+    {
+        $idle = $this->getIdleCount();
+
+        return [
+            'max_active' => $this->maxActive,
+            'size' => $this->size,               // connections that exist now
+            'active' => max(0, $this->size - $idle), // currently borrowed
+            'idle' => $idle,
+            'waiting' => $this->waiting,         // coroutines blocked in borrow()
+            'closed' => $this->closed,
+            'total_created' => $this->totalCreated,
+            'total_borrowed' => $this->totalBorrowed,
+            'total_timeouts' => $this->totalTimeouts,
+            'total_discarded' => $this->totalDiscarded,
+        ];
+    }
+
     private function create(): object
     {
         $this->size++;
         try {
-            return ($this->factory)();
+            $connection = ($this->factory)();
+            $this->totalCreated++;
+            return $connection;
         } catch (\Throwable $e) {
             $this->size--;
             throw $e;
@@ -229,5 +342,6 @@ class ConnectionPool
         if ($this->size > 0) {
             $this->size--;
         }
+        $this->totalDiscarded++;
     }
 }

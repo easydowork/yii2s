@@ -10,6 +10,7 @@ declare(strict_types=1);
 
 namespace Yii2S\Swoole\Server;
 
+use Yii2S\Swoole\Pools\PoolMetricsCollector;
 use Yii2S\Swoole\Runtime\CoroutineRequest;
 use Yii2S\Swoole\Runtime\CoroutineResponse;
 use Yii2S\Swoole\Runtime\RequestStateManager;
@@ -44,6 +45,18 @@ class RequestDispatcher implements RequestDispatcherInterface
      */
     public ?string $staticRoot = null;
 
+    /**
+     * @var bool whether to expose the connection pool metrics debug endpoint
+     * ([[poolMetricsPath]]). Keep it disabled on public deployments or block
+     * the path at the reverse proxy.
+     */
+    public bool $enablePoolMetricsEndpoint = false;
+
+    /**
+     * @var string request path of the pool metrics debug endpoint
+     */
+    public string $poolMetricsPath = '/__pool';
+
     private ?WebApplication $application = null;
 
     private ?StaticFileServer $staticFileServer = null;
@@ -61,6 +74,10 @@ class RequestDispatcher implements RequestDispatcherInterface
         if ($this->staticRoot !== null && str_starts_with($this->staticRoot, '@')) {
             $this->staticRoot = Yii::getAlias($this->staticRoot);
         }
+        $this->enablePoolMetricsEndpoint = (bool) ($config['enablePoolMetricsEndpoint'] ?? $this->enablePoolMetricsEndpoint);
+        if (isset($config['poolMetricsPath']) && is_string($config['poolMetricsPath'])) {
+            $this->poolMetricsPath = $config['poolMetricsPath'];
+        }
         $this->responseSender = $config['responseSender'] ?? new SwooleResponseSender();
         $this->stateManager = $config['stateManager'] ?? new RequestStateManager();
     }
@@ -72,6 +89,43 @@ class RequestDispatcher implements RequestDispatcherInterface
     {
         $this->staticRoot = $root;
         $this->staticFileServer = null;
+    }
+
+    /**
+     * Serves the connection pool metrics debug endpoint when enabled. Runs
+     * before the request enters the Yii lifecycle: it only reads pool state
+     * and never borrows a connection.
+     */
+    private function tryServePoolMetrics(Request $swooleRequest, Response $swooleResponse): bool
+    {
+        if (!$this->enablePoolMetricsEndpoint) {
+            return false;
+        }
+
+        $path = parse_url((string) ($swooleRequest->server['request_uri'] ?? ''), PHP_URL_PATH);
+        if (!is_string($path) || rtrim($path, '/') !== $this->poolMetricsPath) {
+            return false;
+        }
+
+        $pools = [];
+        foreach (PoolMetricsCollector::collect($this->getApplication()) as $id => $pool) {
+            try {
+                $pools[$id] = $pool->getMetrics();
+            } catch (\Throwable $e) {
+                $pools[$id] = ['error' => $e->getMessage()];
+            }
+        }
+
+        if ($swooleResponse->isWritable()) {
+            $swooleResponse->status(200);
+            $swooleResponse->header('Content-Type', 'application/json');
+            $swooleResponse->end((string) json_encode(
+                ['pools' => $pools],
+                JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES
+            ));
+        }
+
+        return true;
     }
 
     /**
@@ -95,7 +149,12 @@ class RequestDispatcher implements RequestDispatcherInterface
             return;
         }
 
+        if ($this->tryServePoolMetrics($swooleRequest, $swooleResponse)) {
+            return;
+        }
+
         $app = $this->getApplication();
+        $this->stateManager->beginRequest();
 
         try {
             $request = $app->getRequest();
@@ -123,13 +182,9 @@ class RequestDispatcher implements RequestDispatcherInterface
     public function prewarm(): void
     {
         try {
-            $app = $this->getApplication();
-            foreach ($app->getComponents(false) as $id => $definition) {
+            foreach (PoolMetricsCollector::collect($this->getApplication()) as $id => $pool) {
                 try {
-                    $component = $app->get($id, false);
-                    if ($component !== null && method_exists($component, 'getPool')) {
-                        $component->getPool();
-                    }
+                    $pool->getMetrics(); // touch: validates the pool is usable
                 } catch (Throwable $e) {
                     Yii::error("Failed to pre-warm component '{$id}': " . $e->getMessage(), __METHOD__);
                 }

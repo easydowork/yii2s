@@ -16,6 +16,10 @@ parameters:
         -
             message: '#If condition is always true#'
             path: src/Server/RequestDispatcher.php
+        # The flag is flipped by a separate coroutine phpstan cannot model.
+        -
+            message: '#will always evaluate to false#'
+            path: tests/server/HttpServerGracefulStopTest.php
         # The server state changes inside a separate coroutine, which phpstan
         # cannot model: it assumes isRunning() never flips back to false.
         -

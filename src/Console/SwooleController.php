@@ -61,6 +61,21 @@ class SwooleController extends Controller
             $server->port = (int) $port;
         }
 
+        // Guard against starting a second server on the same pid file (which
+        // would race over the port and the pid file itself).
+        $pidFile = $server->getPidFile();
+        if ($pidFile->exists() && $pidFile->isAlive()) {
+            $this->stderr(sprintf(
+                "A server is already running on %s:%d (pid %s, pid file %s).\n" .
+                "Stop it first with: php yii swoole/stop\n",
+                $server->host,
+                $server->port,
+                (string) ($pidFile->read()['pid'] ?? '?'),
+                $pidFile->getPath()
+            ));
+            return ExitCode::UNSPECIFIED_ERROR;
+        }
+
         $this->stdout(sprintf(
             "Swoole HTTP server listening on %s:%d (pid: %d)\n",
             $server->host,

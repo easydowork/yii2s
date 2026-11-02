@@ -27,7 +27,17 @@ class TestSiteController extends Controller
     {
         return [
             'get' => Yii::$app->request->getQueryParams(),
+            'post' => Yii::$app->request->getBodyParams(),
             'method' => Yii::$app->request->getMethod(),
+        ];
+    }
+
+    public function actionCsrf(): array
+    {
+        // Enables CSRF validation and returns the current token.
+        return [
+            'token' => Yii::$app->request->getCsrfToken(),
+            'name' => Yii::$app->request->csrfParam,
         ];
     }
 }

@@ -1,7 +1,7 @@
 # Yii2S Swoole 加速扩展包 — 开发文档
 
 > 项目：`yii2s/yii2-swoole`
-> 运行时：Swoole 6.1.7（swoole-cli 内嵌 PHP 8.4.14，Windows）
+> 运行时：Swoole 6.2.2（swoole-cli 内嵌 PHP 8.4.14，Windows）
 > 状态：核心功能已完成并通过真实环境回归测试（2026-11-01）
 
 ---
@@ -140,7 +140,7 @@ tests/
 
 ```powershell
 # 全量测试
-D:\swoole-cli-v6.1.7-cygwin-x64\bin\swoole-cli.exe vendor/phpunit/phpunit/phpunit --no-coverage
+D:\swoole-cli-v6.2.2-msys2-x64\bin\swoole-cli.exe vendor/phpunit/phpunit/phpunit --no-coverage
 
 # 单套件
 ...\swoole-cli.exe vendor/phpunit/phpunit/phpunit --no-coverage tests/db
@@ -175,7 +175,7 @@ D:\EServer-data\childApp\php\php-8.4\php.exe vendor/phpstan/phpstan/phpstan anal
 
 | 端点 | 结果 |
 |---|---|
-| `GET /` | `{"php":"8.4.14","swoole":"6.1.7"}` ✓ |
+| `GET /` | `{"php":"8.4.14","swoole":"6.2.2"}` ✓ |
 | `GET /demo/db` | 连接池查询 user 表 ✓ |
 | `GET /demo/transaction` | `{"committed":true,"id":9}` 事务+自增ID ✓ |
 | `GET /demo/redis` | set/get/incr ✓ |
@@ -270,9 +270,12 @@ powershell -File scripts/ci-local.ps1 phpunit      # 单个 job：phpunit / stat
    `swoole/stop` `swoole/status` `swoole/reload` 命令、Windows 停服标志文件 +
    watcher 协程轮询（500ms）。Linux 生产环境建议 supervisor/systemd 托管；
    Windows 下 `reload` 会尽力 respawn，失败时提示手动重启（本机 exec/popen 受限）
-2. [x] **静态文件服务**（已完成）：协程 Http\Server 不支持 Swoole 原生 `enable_static_handler`（实测所有请求都进 handle 回调），
-   因此采用 PHP 层方案：`HttpServer::documentRoot` 注入 `RequestDispatcher::staticRoot`，由 `StaticFileServer` 提供
-   MIME 映射、Cache-Control、realpath 前缀防穿越校验；未命中的路径自动落到 Yii2 路由（含 404）
+2. [x] **静态文件服务**（已完成，可选项）：生产架构下静态文件应由 nginx 直接服务（见下文部署章节），
+   扩展包内不做静态处理。`HttpServer::documentRoot` 仅作为**开发环境/无反向代理场景**的可选便利：
+   注入 `RequestDispatcher::staticRoot` 后由 `StaticFileServer` 提供 MIME 映射、Cache-Control、
+   realpath 前缀防穿越校验；未命中的路径自动落到 Yii2 路由。默认关闭（null）。
+   注：协程版 `Http\Server` 不支持 Swoole 原生 `enable_static_handler`（实测所有请求都进 handle 回调），
+   所以即使要做也只能 PHP 层实现
 3. [x] **Queue 组件**（已完成）：`Queue\CoroutineRedisQueue`，任务存 ZSET（score=可执行时间戳）统一延迟投递与可见性超时；
    预留用 ZRANGEBYSCORE+ZREM 原子抢占；失败任务 ttr 后重试（attempts+1），超过 maxAttempts 进死信列表；
    `run(N)` 处理至多 N 个可见任务（队列空即返回），`run(0)` 无限轮询供 `queue/serve` 控制台 worker 使用
@@ -285,37 +288,32 @@ powershell -File scripts/ci-local.ps1 phpunit      # 单个 job：phpunit / stat
 
 ### 中优先级
 
-- [ ] **User 组件**：`CoroutineUser`（session 已就绪，改造量小）
-- [ ] **CSRF 完整适配**（当前示例关闭了 CSRF）
-- [ ] **Basic Auth**：从 Authorization header 解析（`PHP_AUTH_*` 超全局不可用）
-- [ ] **Redis MULTI/事务**：`CoroutineRedisConnection` 暂不支持 MULTI 管线
-- [ ] **优雅停机增强**：在途请求计数 + 有界等待
-- [ ] **自定义 classMap / 命令行参数校验增强**
+- [x] **User 组件**（已验证无需实现）：`RequestStateManager` 每请求重建 `user` 组件（含 identity 缓存），
+  session 协程安全，原版 `yii\web\User` 直接可用；集成测试覆盖了会话与状态隔离
+- [x] **CSRF 适配**（已验证天然工作）：CSRF cookie 走协程安全的 Request/Response cookie 通道，
+  集成测试覆盖 token 签发→无 token 400→带 token 200 全流程；example 已默认开启
+- [x] **Redis MULTI/事务**（已验证天然工作）：协程粘性借用保证 multi/exec 落在同一连接，
+  phpredis 的 MULTI/DISCARD/PIPELINE 全部可用，测试固化该行为
+- [x] **优雅停机增强**（已完成）：`RequestStateManager` 在途请求计数 + `HttpServer::gracefulTimeout`
+  （默认 10s）——stop() 先等在途请求排空（有界）再 shutdown，慢请求测试验证响应仍会送达
+- [x] **Basic Auth**（已验证天然工作）：`CoroutineRequest` 的 header 通道使官方
+  `yii\filters\auth\HttpBasicAuth` 直接可用（`getAuthUser/getAuthPassword` 从 Authorization header
+  解析，`PHP_AUTH_*` 本就用不到）；6 个单测固化行为（密码含冒号/空密码/非 Basic scheme/大小写）
+- [x] **命令健壮性**（已完成）：`swoole/start` 防双开守卫（pid 文件进程存活即拒绝启动并提示 stop 命令）、
+  `queue/serve --limit` 负数校验；自定义应用类已由 `RequestDispatcher` 的 app config `'class'` 键支持
 
 ### 低优先级 / 长期
 
-- [ ] 队列协程消费多 worker、失败重试、死信
+- [x] **队列失败重试、死信**（已完成，随 Queue 组件交付）：ttr 后自动重试、超 maxAttempts 进死信列表；
+  多消费 worker 无需代码——Redis 队列预留是原子的，直接跑多个 `queue/serve` 进程即可
 - [ ] MySQL 主从分离（`masters`/`slaves` 配置透传，池化模式下未支持）
-- [ ] 连接池指标导出（pool size / idle / wait 计数，可暴露 `/__pool` 调试端点）
+- [x] **连接池指标导出**（已完成）：`ConnectionPool::getMetrics()`（size/active/idle/waiting 瞬时值 +
+  total_created/borrowed/timeouts/discarded 累计值）；`RequestDispatcher` 的 `/__pool` 调试端点
+  （`enablePoolMetricsEndpoint`，**默认关闭**，生产建议 nginx 屏蔽该路径或仅内网开启）；
+  发现过程中顺带修复了 `prewarm()` 的组件发现 bug（`getComponents(false)` 只返回已实例化组件，
+  池组件从未被预热到——现统一由 `PoolMetricsCollector` 按 `HasConnectionPool` 接口发现）
 - [ ] 压测基准报告（wrk/ab，对比 FPM 模式）
 - [ ] 发布到 Packagist（需 GitHub 仓库 + 打 tag；CI 已就绪）
-
-### 中优先级
-
-- [ ] **User 组件**：`CoroutineUser`（依赖 session 已就绪，改造量小）
-- [ ] **CSRF**：`CoroutineRequest` 未接 `$_SERVER` 系 header 的完整适配（当前示例关闭了 CSRF）
-- [ ] **Basic Auth**：`getAuthUser/getAuthPassword` 未实现（PHP_AUTH_* 超全局不可用，需从 Authorization header 解析）
-- [ ] **Redis MULTI/事务**：`CoroutineRedisConnection` 暂不支持 MULTI 管线
-- [ ] **优雅停机增强**：在途请求计数 + 等待（当前 shutdown 直接断开）
-- [ ] **自定义 classMap / 命令行参数校验增强**
-
-### 低优先级 / 长期
-
-- [ ] 队列协程消费多 worker、失败重试、死信
-- [ ] MySQL 主从分离（`masters`/`slaves` 配置透传，当前池化模式下未支持）
-- [ ] 连接池指标导出（pool size / idle / wait 计数）
-- [ ] swagger/OpenAPI 式示例与压测报告（wrk/ab 基准数据）
-- [ ] 发布到 Packagist（当前通过 path 仓库或直接源码引入）
 
 ### 已知边界（设计取舍，非缺陷）
 
@@ -329,10 +327,10 @@ powershell -File scripts/ci-local.ps1 phpunit      # 单个 job：phpunit / stat
 
 ```powershell
 # 1. 初始化测试库（自动建库建表插数据）
-D:\swoole-cli-v6.1.7-cygwin-x64\bin\swoole-cli.exe example\init-db.php
+D:\swoole-cli-v6.2.2-msys2-x64\bin\swoole-cli.exe example\init-db.php
 
 # 2. 启动服务器
-D:\swoole-cli-v6.1.7-cygwin-x64\bin\swoole-cli.exe example\yii swoole/start
+D:\swoole-cli-v6.2.2-msys2-x64\bin\swoole-cli.exe example\yii swoole/start
 # 可选参数：--host=0.0.0.0 --port=8080
 
 # 3. 访问
@@ -360,3 +358,95 @@ D:\swoole-cli-v6.1.7-cygwin-x64\bin\swoole-cli.exe example\yii swoole/start
     ],
 ],
 ```
+
+## 五点五、压测基准
+
+`scripts/bench.php` 是内置的协程压测器（无外部依赖，Linux 同样可用）：
+
+```powershell
+swoole-cli scripts/bench.php --path=/demo/db --concurrency=100 --duration=5
+```
+
+### 基准环境
+
+- Windows 11 + msys2 swoole-cli（Swoole 6.2.2 / PHP 8.4.14），**单进程** Swoole HTTP 服务器
+- 客户端与服务器同机（CPU 竞争，数字偏保守）；MySQL 8 / Redis 7 本机
+- keep-alive 连接，预热 1s 不计入
+
+### 结果（5s 采样，零 5xx）
+
+| 端点 | 并发 | QPS | p50 | p99 | 说明 |
+|---|---|---|---|---|---|
+| `/`（纯框架） | 100 | 8132 | 9.7ms | 19.9ms | 路由+JSON 序列化 |
+| `/demo/db`（2 条 SQL） | 100 | 2384 | 33.4ms | 43.7ms | 连接池借还 |
+| `/demo/redis`（3 命令） | 100 | 2851 | 27.9ms | 33.5ms | 池化 Redis |
+| `/demo/concurrent`（10 并行 SQL） | 5~10 | ~8 | 128ms | 3s* | 见下方容量分析 |
+
+\* p99 3s = borrow 等待超时（waitTimeout=3s）：每请求 10 个子协程各借 1 连接，
+并发 10 时需要 100 连接当量，远超池容量 20，部分查询排队到超时（demo 把超时吞成 error payload 返回 200）。
+**连接池是硬容量边界**：业务峰值需要的并发连接数不要超过 `poolMaxActive`，超容量即排队/超时。
+
+### 压测发现的两个真实 bug（均已修复）
+
+1. **子协程连接泄漏**：`demo/concurrent` 每请求 10 个子协程各借 1 连接，存入各自的
+   `CoroutineContext`；请求结束时 `release()` 只归还主协程的连接——子协程借的连接全部泄漏，
+   几个请求后池被漏光（当时 `/__pool` 显示 db 池 active=20、idle=0）。
+   修复：`ConnectionPool::trackBorrow()` 登记借出协程 cid，`sweep()`（每请求结束时由
+   RequestStateManager 调用）回收借用方已死亡的连接（销毁重建，正确性优先）。
+2. **msys2 平台 WeakMap 跨协程不可见**：子协程对 WeakMap 的写入在其他协程读不到
+   （独立脚本实锤），导致最初基于 WeakMap 的追踪失效、基于 defer 的归还直接把进程打崩。
+   修复：登记表改用普通数组（`spl_object_id` 索引）。**该平台的 WeakMap 不要跨协程使用。**
+
+## 六、生产部署（nginx + 多实例）
+
+标准架构：**nginx 负责静态文件与 TLS 终结，Swoole 服务器只处理动态请求**——扩展包不需要做静态文件服务。
+多实例（利用多核）：`swoole/start` 构造时已启用 `SO_REUSEPORT`，直接启动 N 个实例绑同一端口即可，
+由 supervisor/systemd 托管。
+
+```nginx
+server {
+    listen 80;
+    server_name example.com;
+
+    root /var/www/app/public;   # 静态资源目录
+    index index.html;
+
+    # 静态文件：nginx 直接服务（命中不了才走动态）
+    location ~* \.(css|js|png|jpg|jpeg|gif|svg|webp|ico|woff2?|ttf|eot|map|json)$ {
+        expires 30d;
+        add_header Cache-Control "public";
+        try_files $uri =404;
+    }
+
+    # 动态请求：转发给 Swoole 服务器（多实例同一端口由内核负载均衡）
+    location / {
+        proxy_pass http://127.0.0.1:9501;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
+
+对应的 supervisor 配置（多实例）：
+
+```ini
+[program:yii2s]
+command=/usr/local/bin/swoole-cli /var/www/app/yii swoole/start --host=127.0.0.1 --port=9501
+numprocs=4                      ; 4 个实例共享 9501 端口（reuse_port）
+process_name=%(program_name)s_%(process_num)02d
+autostart=true
+autorestart=true                ; 实例退出即自动拉起（等价于 reload 的生产形态）
+stopsignal=TERM                 ; 触发优雅停机
+stopwaitsecs=25
+```
+
+要点：
+
+- `X-Forwarded-Proto/For` 会被 `CoroutineRequest` 自动识别（HTTPS 判定、真实 IP）；
+- 静态文件由 nginx 直接返回，动态路径全部走 Swoole；`documentRoot` 配置此时不需要；
+- 队列消费独立于 HTTP 服务器运行：`php yii queue/serve`，同样用 supervisor 托管。

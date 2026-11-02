@@ -29,6 +29,8 @@ class RequestStateManager
      */
     public const REQUEST_SCOPED_COMPONENTS = ['request', 'response', 'session', 'user'];
 
+    private static int $activeRequests = 0;
+
     /**
      * Captures component definitions right after the application is created so
      * they can be restored on cleanup.
@@ -41,10 +43,29 @@ class RequestStateManager
     }
 
     /**
+     * Marks the start of a request; paired with [[cleanup()]] in a
+     * try/finally by [[\Yii2S\Swoole\Server\RequestDispatcher]].
+     */
+    public function beginRequest(): void
+    {
+        self::$activeRequests++;
+    }
+
+    /**
+     * Number of requests currently being processed. Used by the server to
+     * wait for in-flight requests during graceful shutdown.
+     */
+    public static function getActiveRequests(): int
+    {
+        return self::$activeRequests;
+    }
+
+    /**
      * Rebuilds request-scoped components and releases pooled resources.
      */
     public function cleanup(Application $app): void
     {
+        self::$activeRequests--;
         $definitions = $app->getComponents(true);
 
         foreach (self::REQUEST_SCOPED_COMPONENTS as $id) {
@@ -53,18 +74,32 @@ class RequestStateManager
             }
         }
 
-        // Return pooled connections borrowed by the current coroutine.
+        // Return pooled connections borrowed by the current coroutine, then
+        // reclaim connections whose borrowing coroutine died during the
+        // request (e.g. parallel query sub-coroutines) and would otherwise
+        // leak.
         foreach ($app->getComponents(false) as $id => $definition) {
             try {
                 $component = $app->get($id, false);
             } catch (\Throwable) {
                 continue;
             }
-            if (is_object($component) && method_exists($component, 'release')) {
+            if (!is_object($component)) {
+                continue;
+            }
+
+            if (method_exists($component, 'release')) {
                 try {
                     $component->release();
                 } catch (\Throwable $e) {
                     Yii::error("Failed to release component '{$id}': " . $e->getMessage(), __METHOD__);
+                }
+            }
+            if (method_exists($component, 'getPool')) {
+                try {
+                    $component->getPool()->sweep();
+                } catch (\Throwable $e) {
+                    Yii::error("Failed to sweep pool of component '{$id}': " . $e->getMessage(), __METHOD__);
                 }
             }
         }

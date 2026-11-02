@@ -37,6 +37,11 @@ class QueueController extends Controller
 
     public function actionServe(): int
     {
+        if ($this->limit < 0) {
+            $this->stderr("The limit must be greater than or equal to 0.\n");
+            return ExitCode::UNSPECIFIED_ERROR;
+        }
+
         $queue = Instance::ensure(Yii::$app->get($this->queueComponent), CoroutineRedisQueue::class);
         if ($this->channel !== null) {
             $queue->channel = $this->channel;

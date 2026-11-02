@@ -15,6 +15,7 @@ use Swoole\Coroutine\Http\Server as SwooleCoroutineHttpServer;
 use Swoole\ExitException;
 use Swoole\Process;
 use Yii;
+use Yii2S\Swoole\Runtime\RequestStateManager;
 use yii\base\Component;
 use yii\base\InvalidConfigException;
 use yii\di\Instance;
@@ -57,6 +58,10 @@ class HttpServer extends Component
      *  when set, Swoole serves existing files directly and missing paths
      *  fall through to the Yii2 router */
     public $documentRoot = null;
+
+    /** @var float seconds to wait for in-flight requests to finish during a
+     *  graceful stop before shutting down regardless */
+    public float $gracefulTimeout = 10.0;
 
     /** @var callable|null optional factory: function (string $host, int $port): SwooleCoroutineHttpServer */
     public $serverFactory = null;
@@ -237,6 +242,17 @@ class HttpServer extends Component
             return;
         }
         $this->stopRequested = true;
+
+        // Give in-flight requests a bounded amount of time to finish before
+        // the server stops accepting and processing. Skipping the wait when
+        // not inside a coroutine (signal callbacks on some platforms).
+        if (Coroutine::getCid() !== -1) {
+            $deadline = microtime(true) + $this->gracefulTimeout;
+            while (RequestStateManager::getActiveRequests() > 0 && microtime(true) < $deadline) {
+                Coroutine::sleep(0.05);
+            }
+        }
+
         $this->server->shutdown();
     }
 

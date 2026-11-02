@@ -18,7 +18,7 @@ return [
         'request' => [
             'class' => \Yii2S\Swoole\Runtime\CoroutineRequest::class,
             'cookieValidationKey' => 'yii2s-example-cookie-key',
-            'enableCsrfValidation' => false,
+            'enableCsrfValidation' => true,
         ],
         'response' => [
             'class' => \Yii2S\Swoole\Runtime\CoroutineResponse::class,
@@ -35,7 +35,9 @@ return [
             'port' => 9501,
             'pidFile' => '@app/runtime/swoole-server.pid',
             'documentRoot' => '@app/public',
-            'dispatcher' => new \Yii2S\Swoole\Server\RequestDispatcher(__DIR__ . '/web.php'),
+            'dispatcher' => new \Yii2S\Swoole\Server\RequestDispatcher(__DIR__ . '/web.php', [
+                'enablePoolMetricsEndpoint' => true,
+            ]),
         ],
         'db' => [
             'class' => \Yii2S\Swoole\Db\CoroutineDbConnection::class,

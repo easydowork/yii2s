@@ -12,6 +12,7 @@ namespace Yii2S\Swoole\Db;
 
 use Yii2S\Swoole\Coroutine\CoroutineContext;
 use Yii2S\Swoole\Pools\ConnectionPool;
+use Yii2S\Swoole\Pools\HasConnectionPool;
 use yii\db\Connection;
 
 /**
@@ -27,7 +28,7 @@ use yii\db\Connection;
  * Set [[enableCoroutinePooling]] to `false` to fall back to the standard
  * single-connection behavior for debugging or compatibility.
  */
-class CoroutineDbConnection extends Connection
+class CoroutineDbConnection extends Connection implements HasConnectionPool
 {
     /**
      * @var int maximum number of pooled connections

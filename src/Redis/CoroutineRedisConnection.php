@@ -12,6 +12,7 @@ namespace Yii2S\Swoole\Redis;
 
 use Yii2S\Swoole\Coroutine\CoroutineContext;
 use Yii2S\Swoole\Pools\ConnectionPool;
+use Yii2S\Swoole\Pools\HasConnectionPool;
 use yii\base\Component;
 
 /**
@@ -37,6 +38,8 @@ use yii\base\Component;
  * @method int|false zCard(string $key)
  * @method int|false lPush(string $key, mixed ...$values)
  * @method int|false lLen(string $key)
+ * @method \Redis multi(int $mode = 0)
+ * @method \Redis pipeline()
  * @method mixed auth(mixed ...$args)
  * @method bool select(int $database)
  * @method bool close()
@@ -50,7 +53,7 @@ use yii\base\Component;
  * Yii::$app->redis->executeCommand('SETEX', ['key', 60, 'value']);
  * ```
  */
-class CoroutineRedisConnection extends Component
+class CoroutineRedisConnection extends Component implements HasConnectionPool
 {
     public string $hostname = '127.0.0.1';
 

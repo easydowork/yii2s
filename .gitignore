@@ -1,7 +1,6 @@
 ﻿/vendor/
 /composer.lock
 /example/runtime/
-/tests/runtime/
 *.log
 cookies.txt
 

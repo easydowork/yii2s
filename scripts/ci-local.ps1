@@ -6,7 +6,7 @@
 #
 # The swoole-cli binary location can be overridden with the SWOOLE_CLI
 # environment variable, e.g.:
-#   $env:SWOOLE_CLI = "D:\swoole-cli-v6.1.7-cygwin-x64\bin\swoole-cli.exe"
+#   $env:SWOOLE_CLI = "D:\swoole-cli-v6.2.2-msys2-x64\bin\swoole-cli.exe"
 
 param(
     [Parameter(Position = 0)]
@@ -20,7 +20,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
 $php = 'D:\EServer-data\childApp\php\php-8.4\php.exe'
-$swooleCli = if ($env:SWOOLE_CLI) { $env:SWOOLE_CLI } else { 'D:\swoole-cli-v6.1.7-cygwin-x64\bin\swoole-cli.exe' }
+$swooleCli = if ($env:SWOOLE_CLI) { $env:SWOOLE_CLI } else { 'D:\swoole-cli-v6.2.2-msys2-x64\bin\swoole-cli.exe' }
 
 $failures = 0
 

@@ -96,4 +96,72 @@ class ConnectionPoolTest extends TestCase
         $this->expectException(\RuntimeException::class);
         $this->runInCoroutine(fn () => $pool->borrow());
     }
+
+    public function testSweepReclaimsConnectionsOfDeadCoroutines(): void
+    {
+        $pool = new ConnectionPool(fn (): object => new \stdClass(), 5, 0.1);
+
+        $this->runInCoroutine(function () use ($pool): void {
+            // Sub-coroutines borrow and exit without returning - exactly what
+            // parallel DB query sub-coroutines do when nobody releases them.
+            for ($i = 0; $i < 3; $i++) {
+                \Swoole\Coroutine::create(function () use ($pool): void {
+                    $pool->borrow();
+                });
+            }
+            // Let the sub-coroutines borrow and die.
+            \Swoole\Coroutine::sleep(0.1);
+
+            $reclaimed = $pool->sweep();
+            $this->assertSame(3, $reclaimed);
+            $this->assertSame(0, $pool->getSize());
+            $this->assertSame(0, $pool->getMetrics()['active']);
+        });
+
+        // The pool is fully usable again afterwards.
+        $this->runInCoroutine(function () use ($pool): void {
+            $pool->return($pool->borrow());
+        });
+        $this->assertSame(1, $pool->getIdleCount());
+    }
+
+    public function testMetricsTrackPoolActivity(): void
+    {
+        $pool = new ConnectionPool(fn (): object => new \stdClass(), 2, 0.1);
+
+        $metrics = $pool->getMetrics();
+        $this->assertSame(2, $metrics['max_active']);
+        $this->assertSame(0, $metrics['size']);
+        $this->assertSame(0, $metrics['total_borrowed']);
+
+        $this->runInCoroutine(function () use ($pool): void {
+            $first = $pool->borrow();
+            $second = $pool->borrow(); // pool now exhausted (max 2)
+
+            $metrics = $pool->getMetrics();
+            $this->assertSame(2, $metrics['size']);
+            $this->assertSame(2, $metrics['active']);
+            $this->assertSame(0, $metrics['idle']);
+            $this->assertSame(2, $metrics['total_borrowed']);
+
+            // A third borrow must block and time out.
+            try {
+                $pool->borrow();
+                $this->fail('expected pool exhaustion');
+            } catch (\RuntimeException) {
+            }
+
+            $metrics = $pool->getMetrics();
+            $this->assertSame(1, $metrics['total_timeouts']);
+            $this->assertSame(0, $metrics['waiting'], 'waiting count must drain after timeout');
+
+            $pool->return($first);
+            $pool->discard($second);
+
+            $metrics = $pool->getMetrics();
+            $this->assertSame(1, $metrics['idle']);
+            $this->assertSame(0, $metrics['active'], 'the borrowed second was discarded');
+            $this->assertSame(1, $metrics['total_discarded']);
+        });
+    }
 }

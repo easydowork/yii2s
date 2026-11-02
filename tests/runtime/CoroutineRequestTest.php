@@ -1,0 +1,137 @@
+<?php
+
+/**
+ * @link https://github.com/yii2s/yii2-swoole
+ * @copyright Copyright (c) 2026 Yii2S Software LLC
+ * @license MIT
+ */
+
+declare(strict_types=1);
+
+namespace yii2stest\runtime;
+
+use Yii2S\Swoole\Runtime\CoroutineRequest;
+use yii\web\Request;
+use yii2stest\TestCase;
+
+/**
+ * @group runtime
+ */
+class CoroutineRequestTest extends TestCase
+{
+    private function createSwooleRequest(array $options = []): \Swoole\Http\Request
+    {
+        $request = new \Swoole\Http\Request();
+        $request->get = $options['get'] ?? [];
+        $request->post = $options['post'] ?? [];
+        $request->cookie = $options['cookie'] ?? [];
+        $request->header = $options['header'] ?? [];
+        $request->server = array_merge([
+            'request_method' => 'GET',
+            'request_uri' => '/',
+            'remote_addr' => '127.0.0.1',
+        ], $options['server'] ?? []);
+
+        return $request;
+    }
+
+    public function testMethodAndPathInfo(): void
+    {
+        $request = new CoroutineRequest(['cookieValidationKey' => 'test']);
+        $request->setSwooleRequest($this->createSwooleRequest([
+            'server' => [
+                'request_method' => 'POST',
+                'request_uri' => '/demo/db',
+                'query_string' => 'page=2',
+            ],
+        ]));
+
+        $this->assertSame('POST', $request->getMethod());
+        $this->assertSame('demo/db', $request->getPathInfo());
+        $this->assertSame('/demo/db?page=2', $request->getUrl());
+        $this->assertSame('page=2', $request->getQueryString());
+        $this->assertSame('127.0.0.1', $request->getUserIP());
+    }
+
+    public function testQueryAndBodyParams(): void
+    {
+        $request = new CoroutineRequest(['cookieValidationKey' => 'test']);
+        $request->setSwooleRequest($this->createSwooleRequest([
+            'get' => ['page' => '2', 'sort' => 'name'],
+            'post' => ['title' => 'hello'],
+            'header' => ['content-type' => 'application/x-www-form-urlencoded'],
+            'server' => ['request_uri' => '/posts', 'query_string' => ''],
+        ]));
+
+        $this->assertSame(['page' => '2', 'sort' => 'name'], $request->getQueryParams());
+        $this->assertSame(['title' => 'hello'], $request->getBodyParams());
+    }
+
+    public function testJsonBodyParams(): void
+    {
+        $request = new CoroutineRequest(['cookieValidationKey' => 'test']);
+        $request->setSwooleRequest($this->createSwooleRequest([
+            'header' => ['content-type' => 'application/json'],
+            'server' => ['request_uri' => '/api'],
+        ]));
+
+        $this->assertSame('application/json', $request->getContentType());
+        // rawContent() is only available on real server requests; with a bare
+        // object it returns an empty string, which must parse to [].
+        $this->assertSame([], $request->getBodyParams());
+    }
+
+    public function testHeaders(): void
+    {
+        $request = new CoroutineRequest(['cookieValidationKey' => 'test']);
+        $request->setSwooleRequest($this->createSwooleRequest([
+            'header' => [
+                'host' => 'example.com',
+                'x-custom-header' => 'custom-value',
+            ],
+            'server' => ['request_uri' => '/'],
+        ]));
+
+        $this->assertSame('example.com', $request->getHeaders()->get('Host'));
+        $this->assertSame('example.com', $request->getHeaders()->get('HOST'));
+        $this->assertSame('custom-value', $request->getHeaders()->get('X-Custom-Header'));
+        $this->assertSame('http://example.com', $request->getHostInfo());
+    }
+
+    public function testSecureConnectionDetection(): void
+    {
+        $request = new CoroutineRequest(['cookieValidationKey' => 'test']);
+        $request->setSwooleRequest($this->createSwooleRequest([
+            'server' => ['request_uri' => '/', 'https' => 'on'],
+        ]));
+        $this->assertTrue($request->getIsSecureConnection());
+
+        $request = new CoroutineRequest(['cookieValidationKey' => 'test']);
+        $request->setSwooleRequest($this->createSwooleRequest([
+            'header' => ['x-forwarded-proto' => 'https', 'host' => 'secure.example.com'],
+            'server' => ['request_uri' => '/'],
+        ]));
+        $this->assertTrue($request->getIsSecureConnection());
+        $this->assertSame('https://secure.example.com', $request->getHostInfo());
+    }
+
+    public function testCookies(): void
+    {
+        $request = new CoroutineRequest(['cookieValidationKey' => 'test']);
+        $request->setSwooleRequest($this->createSwooleRequest([
+            'cookie' => ['PHPSESSID' => 'abc123', 'theme' => 'dark'],
+            'server' => ['request_uri' => '/'],
+        ]));
+
+        $cookies = $request->getCookies();
+        $this->assertSame('abc123', $cookies->getValue('PHPSESSID'));
+        $this->assertSame('dark', $cookies->getValue('theme'));
+        $this->assertNull($cookies->getValue('missing'));
+    }
+
+    public function testExtendsYiiWebRequest(): void
+    {
+        $request = new CoroutineRequest(['cookieValidationKey' => 'test']);
+        $this->assertInstanceOf(Request::class, $request);
+    }
+}
