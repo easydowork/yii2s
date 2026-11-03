@@ -183,6 +183,13 @@ php yii queue/serve [--limit=N]                     # 队列消费 worker（无�
    `swoole/start --watch`）；opcache 的时间戳校验在常驻进程里对**已加载的类**无效。
 8. **阻塞扩展与长 CPU 循环** —— Swoole hook 覆盖常见阻塞（PDO/Redis/文件/stream/sleep），
    但 C 扩展直连（librdkafka 等）与纯 CPU 密集计算会卡住事件循环——挪队列或独立进程。
+9. **AR 事务与连接一致性** —— `beginTransaction()` 与 AR 的 `save()` 必须走**同一连接**；
+   在 `Yii::$app` 不存在的上下文（console/测试）中，需显式注入连接（静态持有或构造传入），
+   否则 AR 的 insert 在事务外执行、rollback "无效"。`unlink()` 对 via 关联默认
+   `$delete=false`（UPDATE 置 NULL），pivot 表 FK 列 NOT NULL 时**必须传 `$delete = true`**。
+10. **乐观锁 `version` 列需在 AR 内存中初始化** —— DB 的 `DEFAULT 1` 只填列值不回填 AR
+    状态；`insert()` 后 `update()` 时 `WHERE version = NULL` 永不匹配。在 `rules()` 加
+    `['version'], 'default', 'value' => 1` 或在 `init()` 设 `$this->version = 1`。
 
 ### 资产与布局（真实场景教训：一个遗漏就是 405/404）
 
