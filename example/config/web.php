@@ -92,9 +92,12 @@ return [
             // rejects the second one). supervisor can pass a per-process path.
             'pidFile' => getenv('SWOOLE_PID_FILE') ?: null,
             'documentRoot' => '@app/public',
-            'dispatcher' => new \Yii2S\Swoole\Server\RequestDispatcher(__DIR__ . '/web.php', [
+            'dispatcher' => (new \Yii2S\Swoole\Server\RequestDispatcher(__DIR__ . '/web.php', [
                 'enablePoolMetricsEndpoint' => true,
-            ]),
+            ]))
+                // Raw route: answered without creating the Yii request/response
+                // objects - use it for health checks / tiny stateless APIs.
+                ->addRawRoute('GET', '/ping', static fn (): string => 'pong'),
         ],
     ],
 ];

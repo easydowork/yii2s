@@ -35,6 +35,13 @@ class HttpServer extends Component
     /** @var array<string, mixed> coroutine server settings: backlog, open_tcp_nodelay, max_coroutine, log_level */
     public array $settings = [];
 
+    /**
+     * @var int how many connections to open per pool before the server starts
+     * accepting traffic (DB/Redis warm-up). 0 only instantiates the pools.
+     * Keep it at or below the component's `poolMaxActive`.
+     */
+    public int $prewarmConnections = 0;
+
     /** @var RequestDispatcherInterface|array|string */
     public $dispatcher;
 
@@ -272,6 +279,10 @@ class HttpServer extends Component
         $this->applySettings();
 
         $this->trigger(self::EVENT_AFTER_START);
+
+        if ($this->prewarmConnections > 0) {
+            $this->dispatcher->prewarm($this->prewarmConnections);
+        }
 
         $dispatcher = $this->dispatcher;
         $server = $this->server;

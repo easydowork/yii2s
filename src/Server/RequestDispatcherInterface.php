@@ -24,6 +24,9 @@ interface RequestDispatcherInterface
     /**
      * Warms up resources (e.g. connection pools) before the server starts
      * accepting traffic. Implementations may be no-op.
+     *
+     * @param int $connections how many connections to open per pool (0 only
+     * instantiates the pooled components)
      */
-    public function prewarm(): void;
+    public function prewarm(int $connections = 0): void;
 }

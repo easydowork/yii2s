@@ -66,9 +66,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`scripts/wsl-e2e.sh` / `scripts/wsl-bench.sh` are portable**: `CLI`,
   `PORT`, `APP_DIR`, `CONCURRENCY`, `DURATION` are configurable and both run on
   macOS and Linux instead of a hardcoded WSL path.
+- **Per-request hot-path trimming**: the dispatcher parses `request_uri` once
+  and shares the path across the raw/static/metrics handlers; `RequestStateManager`
+  caches the list of pool-owning component ids (rebuilt only when a new
+  component is instantiated) and only resets `$_FILES` when the request actually
+  had file uploads.
 
 ### Added
 
+- **Connection pool pre-warming**: `HttpServer::$prewarmConnections` (default 0)
+  opens that many connections per pool before the server accepts traffic, so a
+  restart no longer pays connect/handshake latency on the first requests. Each
+  connection is borrowed and held so `borrow()` has to create it, then returned
+  to the idle queue.
+- **Per-request `request`/`response` prototype clone**: `CoroutineApplication`
+  builds one prototype of each and serves `clone` per request instead of a full
+  DI build (~1.5µs saved per object). The prototype is invalidated when
+  `Bootstrap` swaps the component class, so the first request still gets the
+  coroutine class.
 - **`examples/blog`**: cover uploads (CoroutineUploadedFile), comments with
   moderation, Redis view counter, cached front page with version invalidation,
   queue worker + audit log, CSV export through `sendFile()`, API-key

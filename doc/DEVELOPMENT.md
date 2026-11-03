@@ -602,6 +602,9 @@ stopwaitsecs=25                 ; 必须大于 gracefulTimeout(10s)
 - **上传落盘**：业务代码必须改用 `Runtime\CoroutineUploadedFile`（stock `saveAs()` 在
   Swoole 下恒失败，且读全局 `$_FILES`）。
 - **连接池容量**：`poolMaxActive × 实例数 ≤ MySQL max_connections`，Redis 同理。
+- **连接预热**：`swooleHttpServer.prewarmConnections = N`（默认 0）会在服务器开始接流量前
+  为每个池打开 N 条连接并放回空闲队列，省掉重启后首批请求的建连/握手延迟（对 DB/Redis
+  接口的发布后 p99 尤其有用）。N 不要超过组件的 `poolMaxActive`。
 - **超时**：MySQL 建议配置 `PDO::ATTR_TIMEOUT` / `innodb_lock_wait_timeout`，避免一个锁
   等待长期占住池连接。
 - **健康检查**：包内没有 `/health`；在应用里加一条轻量路由，或让 nginx 探静态文件；
@@ -660,7 +663,7 @@ total_borrowed=14144、total_timeouts=0、active=0/idle=20——**零泄漏**。
 
 ## 5.1 测试体系
 
-166 tests / 726 assertions（2 skipped），覆盖十一个目录：连接池并发（借还配对/超时/sweep）、
+167 tests / 741 assertions（2 skipped），覆盖十一个目录：连接池并发（借还配对/超时/sweep）、
 请求适配（头/cookie 签名/上传三种形状）、服务器集成（**真实 socket 交互，非 mock**：
 CSRF 全流程、表单三件套、静态文件、优雅停机、watch 热重载）、DB（事务含嵌套
 savepoint、并发 AR + 并发事务、Query::batch、协程外 detached 直连）、Redis
@@ -673,10 +676,10 @@ savepoint、并发 AR + 并发事务、Query::batch、协程外 detached 直连�
 
 | 运行时 | 测试 | 用途 |
 |---|---|---|
-| macOS + swoole-cli 6.2.0 / PHP 8.4 | 166/726 ✅（2 skipped） | 全套集成测试（真实 socket、优雅停机、watch、pid）+ PHPStan + cs |
+| macOS + swoole-cli 6.2.0 / PHP 8.4 | 167/741 ✅（2 skipped） | 全套集成测试（真实 socket、优雅停机、watch、pid）+ PHPStan + cs |
 | macOS + swoole-cli（进程级 e2e / 基准） | e2e 13 checks / 8148-3330-3616 QPS | start/status/reload respawn/SIGTERM 全过；`/`、`/demo/db`、`/demo/redis`（50 并发 3s，0 错误、池零超时） |
-| WSL Ubuntu + swoole-cli 6.2.2 | 166/726 ✅ | 端到端（start/status/reload respawn/SIGTERM）+ 基准 |
-| WSL Ubuntu + pecl PHP 8.5 / swoole 6.2.4 | 166/726 ✅ | **CI 同源标准构建**（`http_parse_files` 修复的实战检验） |
+| WSL Ubuntu + swoole-cli 6.2.2 | 167/741 ✅ | 端到端（start/status/reload respawn/SIGTERM）+ 基准 |
+| WSL Ubuntu + pecl PHP 8.5 / swoole 6.2.4 | 167/741 ✅ | **CI 同源标准构建**（`http_parse_files` 修复的实战检验） |
 | GitHub Actions | pecl 矩阵 PHP 8.2–8.5 | 云端矩阵 |
 
 独立外部 AI 评审四轮（见附录 B）：第一轮 6 缺陷、第二轮 2 项增量、第三轮

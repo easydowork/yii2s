@@ -32,6 +32,13 @@ class RequestStateManager
     private static int $activeRequests = 0;
 
     /**
+     * @var \WeakMap<Application, array{count: int, ids: list<string>}>|null
+     * cached "components that own a pool" per application, rebuilt whenever
+     * the number of instantiated components changes
+     */
+    private ?\WeakMap $pooledComponents = null;
+
+    /**
      * Captures component definitions right after the application is created so
      * they can be restored on cleanup.
      *
@@ -68,10 +75,13 @@ class RequestStateManager
         self::$activeRequests--;
 
         // Drop the per-request $_FILES population and UploadedFile's static
-        // cache (see CoroutineRequest::setSwooleRequest()).
-        $_FILES = [];
-        if (class_exists(\yii\web\UploadedFile::class)) {
-            \yii\web\UploadedFile::reset();
+        // cache (see CoroutineRequest::setSwooleRequest()) - only when this
+        // request actually populated them; plain JSON requests skip it.
+        if ($_FILES !== []) {
+            $_FILES = [];
+            if (class_exists(\yii\web\UploadedFile::class)) {
+                \yii\web\UploadedFile::reset();
+            }
         }
 
         // CoroutineApplication resolves these four ids from the coroutine
@@ -89,8 +99,31 @@ class RequestStateManager
         // Return pooled connections borrowed by the current coroutine, then
         // reclaim connections whose borrowing coroutine died during the
         // request (e.g. parallel query sub-coroutines) and would otherwise
-        // leak.
-        foreach ($app->getComponents(false) as $id => $definition) {
+        // leak. The id list is cached: the method_exists() scan only runs
+        // again when a new component was instantiated.
+        $components = $app->getComponents(false);
+        $componentCount = count($components);
+        $this->pooledComponents ??= new \WeakMap();
+        $cache = $this->pooledComponents[$app] ?? null;
+        if ($cache === null || $cache['count'] !== $componentCount) {
+            $ids = [];
+            foreach (array_keys($components) as $id) {
+                try {
+                    $component = $app->get($id, false);
+                } catch (\Throwable) {
+                    continue;
+                }
+                if (is_object($component)
+                    && (method_exists($component, 'release') || method_exists($component, 'getPool'))
+                ) {
+                    $ids[] = (string) $id;
+                }
+            }
+            $cache = ['count' => $componentCount, 'ids' => $ids];
+            $this->pooledComponents[$app] = $cache;
+        }
+
+        foreach ($cache['ids'] as $id) {
             try {
                 $component = $app->get($id, false);
             } catch (\Throwable) {

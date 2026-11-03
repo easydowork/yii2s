@@ -93,14 +93,20 @@ class RequestDispatcher implements RequestDispatcherInterface
      * before the request enters the Yii lifecycle: it only reads pool state
      * and never borrows a connection.
      */
-    private function tryServePoolMetrics(Request $swooleRequest, Response $swooleResponse): bool
+    private function tryServePoolMetrics(Request $swooleRequest, Response $swooleResponse, ?string $path = null): bool
     {
         if (!$this->enablePoolMetricsEndpoint) {
             return false;
         }
 
-        $path = parse_url((string) ($swooleRequest->server['request_uri'] ?? ''), PHP_URL_PATH);
-        if (!is_string($path) || rtrim($path, '/') !== $this->poolMetricsPath) {
+        if ($path === null) {
+            $parsed = parse_url((string) ($swooleRequest->server['request_uri'] ?? ''), PHP_URL_PATH);
+            if (!is_string($parsed)) {
+                return false;
+            }
+            $path = $parsed;
+        }
+        if (rtrim($path, '/') !== $this->poolMetricsPath) {
             return false;
         }
 
@@ -128,7 +134,7 @@ class RequestDispatcher implements RequestDispatcherInterface
     /**
      * Attempts to serve the request as a static file.
      */
-    private function tryServeStaticFile(Request $swooleRequest, Response $swooleResponse): bool
+    private function tryServeStaticFile(Request $swooleRequest, Response $swooleResponse, ?string $path = null): bool
     {
         if ($this->staticRoot === null) {
             return false;
@@ -137,7 +143,7 @@ class RequestDispatcher implements RequestDispatcherInterface
             $this->staticFileServer = new StaticFileServer($this->staticRoot);
         }
 
-        return $this->staticFileServer->serve($swooleRequest, $swooleResponse);
+        return $this->staticFileServer->serve($swooleRequest, $swooleResponse, $path);
     }
 
     /**
@@ -174,12 +180,15 @@ class RequestDispatcher implements RequestDispatcherInterface
      * Answers a registered raw route. Returns false when the request is not
      * a raw route and the normal Yii pipeline should handle it.
      */
-    private function tryRawRoute(Request $request, Response $response): bool
+    private function tryRawRoute(Request $request, Response $response, ?string $path = null): bool
     {
-        $uri = (string) ($request->server['request_uri'] ?? '');
-        $path = parse_url($uri, PHP_URL_PATH);
-        if (!is_string($path)) {
-            return false;
+        if ($path === null) {
+            $uri = (string) ($request->server['request_uri'] ?? '');
+            $parsed = parse_url($uri, PHP_URL_PATH);
+            if (!is_string($parsed)) {
+                return false;
+            }
+            $path = $parsed;
         }
 
         $method = strtoupper((string) ($request->server['request_method'] ?? 'GET'));
@@ -223,19 +232,27 @@ class RequestDispatcher implements RequestDispatcherInterface
 
     public function dispatch(Request $swooleRequest, Response $swooleResponse, SwooleCoroutineHttpServer $server): void
     {
+        // Parse the path once for the three pre-Yii handlers; when none of
+        // them is enabled the parse is skipped entirely.
+        $path = null;
+        if ($this->rawRoutes !== [] || $this->staticRoot !== null || $this->enablePoolMetricsEndpoint) {
+            $parsed = parse_url((string) ($swooleRequest->server['request_uri'] ?? ''), PHP_URL_PATH);
+            $path = is_string($parsed) ? $parsed : null;
+        }
+
         // Static files and the metrics endpoint run outside the Yii request
         // lifecycle. A malformed path must never escape as an uncaught
         // exception: inside a coroutine that terminates the worker.
         try {
-            if ($this->rawRoutes !== [] && $this->tryRawRoute($swooleRequest, $swooleResponse)) {
+            if ($path !== null && $this->rawRoutes !== [] && $this->tryRawRoute($swooleRequest, $swooleResponse, $path)) {
                 return;
             }
 
-            if ($this->tryServeStaticFile($swooleRequest, $swooleResponse)) {
+            if ($path !== null && $this->tryServeStaticFile($swooleRequest, $swooleResponse, $path)) {
                 return;
             }
 
-            if ($this->tryServePoolMetrics($swooleRequest, $swooleResponse)) {
+            if ($path !== null && $this->tryServePoolMetrics($swooleRequest, $swooleResponse, $path)) {
                 return;
             }
         } catch (Throwable $exception) {
@@ -271,18 +288,49 @@ class RequestDispatcher implements RequestDispatcherInterface
      * Eagerly resolves pooled components so connection pools are created
      * before the first real request.
      */
-    public function prewarm(): void
+    public function prewarm(int $connections = 0): void
     {
         try {
-            foreach (PoolMetricsCollector::collect($this->getApplication()) as $id => $pool) {
-                try {
-                    $pool->getMetrics(); // touch: validates the pool is usable
-                } catch (Throwable $e) {
-                    Yii::error("Failed to pre-warm component '{$id}': " . $e->getMessage(), __METHOD__);
-                }
-            }
+            $pools = PoolMetricsCollector::collect($this->getApplication());
         } catch (Throwable $e) {
             Yii::error('Connection pool pre-warming failed: ' . $e->getMessage(), __METHOD__);
+
+            return;
+        }
+
+        if ($connections <= 0 || $pools === []) {
+            return; // pools are instantiated, no connections opened
+        }
+
+        foreach ($pools as $id => $pool) {
+            try {
+                $maxActive = (int) ($pool->getMetrics()['max_active'] ?? $connections);
+            } catch (Throwable) {
+                continue;
+            }
+
+            // Borrow the target count while holding every connection, so each
+            // borrow() has to *create* a new one (none is back in the idle
+            // channel yet). Returning them one-by-one up front would let the
+            // next borrow() reuse the same single connection, opening only 1.
+            $target = min($connections, $maxActive);
+            $borrowed = [];
+            try {
+                for ($i = 0; $i < $target; $i++) {
+                    $borrowed[] = $pool->borrow();
+                }
+            } catch (Throwable $e) {
+                Yii::error("Failed to pre-warm pool '{$id}': " . $e->getMessage(), __METHOD__);
+            } finally {
+                foreach ($borrowed as $connection) {
+                    try {
+                        $pool->return($connection);
+                    } catch (Throwable) {
+                        // Pre-warming is best-effort; a failed return is no
+                        // worse than the connection simply not existing.
+                    }
+                }
+            }
         }
     }
 

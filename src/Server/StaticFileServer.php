@@ -94,22 +94,31 @@ class StaticFileServer
      * @return bool true when the request has been served; false when the
      *              request should fall through to the application
      */
-    public function serve(Request $swooleRequest, Response $swooleResponse): bool
+    public function serve(Request $swooleRequest, Response $swooleResponse, ?string $path = null): bool
     {
-        $uri = (string) ($swooleRequest->server['request_uri'] ?? '');
-        if (in_array($uri, ['', '/'], true)) {
+        if ($path === null) {
+            $uri = (string) ($swooleRequest->server['request_uri'] ?? '');
+            if (in_array($uri, ['', '/'], true)) {
+                return false;
+            }
+
+            // Strip the query string; decoding happens after validation.
+            $parsed = parse_url($uri, PHP_URL_PATH);
+            if (!is_string($parsed)) {
+                return false;
+            }
+            $path = $parsed;
+        }
+
+        if ($path === '' || $path === '/') {
             return false;
         }
 
-        // Strip the query string and decode URL escapes. Decoding must happen
-        // *before* validation: an encoded null byte (`%00`) or encoded
-        // separators (`%2e%2e%2f`) would otherwise pass the checks below and
-        // reach realpath(), which throws a ValueError on null bytes - an
-        // uncaught exception here kills the request coroutine (DoS).
-        $path = parse_url($uri, PHP_URL_PATH);
-        if (!is_string($path) || $path === '') {
-            return false;
-        }
+        // Decode URL escapes. Decoding must happen *before* validation: an
+        // encoded null byte (`%00`) or encoded separators (`%2e%2e%2f`) would
+        // otherwise pass the checks below and reach realpath(), which throws
+        // a ValueError on null bytes - an uncaught exception here kills the
+        // request coroutine (DoS).
         $path = urldecode($path);
 
         // Reject null bytes (path truncation) and backslashes (Windows-style

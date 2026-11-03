@@ -301,7 +301,7 @@ swoole-cli scripts/bench.php --path=/demo/db --concurrency=100 --duration=5
 ## 开发与测试
 
 目标平台 Linux；测试可在 Linux/WSL2 与 macOS（swoole-cli）上完整运行，
-全量 166 tests / 726 assertions（2 skipped）全绿（macOS + swoole-cli 6.2.0 /
+全量 167 tests / 741 assertions（2 skipped）全绿（macOS + swoole-cli 6.2.0 /
 PHP 8.4 实测；CI 同源的 pecl 构建跑同一套用例）。
 其中 `tests/compat/` 是按功能点组织的迁移兼容性套件（路由、请求、响应格式、
 Cookie、CSRF、会话、登录、Flash、上传、下载、错误处理、常驻服务、并发隔离），

@@ -44,6 +44,13 @@ class CoroutineApplication extends Application
     private const CONTEXT_KEY_PREFIX = 'yii2s.app.component.';
 
     /**
+     * @var array<string, object> configured prototypes for the two hot
+     * request-scoped components; each request gets a cheap `clone` instead of
+     * a full DI build (~1.5µs each).
+     */
+    private array $scopedPrototypes = [];
+
+    /**
      * Drops the instance cached for the current coroutine, so the next
      * [[get()]] recreates it from the (possibly just updated) definition.
      *
@@ -51,9 +58,12 @@ class CoroutineApplication extends Application
      * resolves `request` before the component classes are swapped, and that
      * stock instance must not survive into the request.
      */
-    public static function forgetComponent(string $id): void
+    public function forgetComponent(string $id): void
     {
         CoroutineContext::remove(self::CONTEXT_KEY_PREFIX . $id);
+        // The prototype was built from the pre-swap definition; drop it so the
+        // next get() rebuilds it from the (now coroutine) class.
+        unset($this->scopedPrototypes[$id]);
     }
 
     /**
@@ -79,7 +89,22 @@ class CoroutineApplication extends Application
             return parent::get($id, $throwException);
         }
 
-        $component = Yii::createObject($definition);
+        $component = null;
+        if (($id === 'request' || $id === 'response') && is_array($definition) && isset($definition['class'])) {
+            try {
+                $prototype = $this->scopedPrototypes[$id] ??= Yii::createObject($definition);
+                $component = clone $prototype;
+                if ($component instanceof \yii\web\Response) {
+                    // Shallow clone shares the header/cookie collections and
+                    // keeps the previous status; clear() resets all of it.
+                    $component->clear();
+                }
+            } catch (\Throwable) {
+                $component = null;
+            }
+        }
+
+        $component ??= Yii::createObject($definition);
         CoroutineContext::set($key, $component);
 
         return $component;

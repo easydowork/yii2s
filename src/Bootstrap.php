@@ -132,7 +132,7 @@ class Bootstrap implements BootstrapInterface
             // caches a stock instance) before this bootstrap runs. Drop it so
             // the current request picks up the coroutine class as well.
             if ($app instanceof Runtime\CoroutineApplication) {
-                Runtime\CoroutineApplication::forgetComponent($id);
+                $app->forgetComponent($id);
             }
         }
     }

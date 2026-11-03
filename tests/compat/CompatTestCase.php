@@ -62,7 +62,7 @@ abstract class CompatTestCase extends DatabaseTestCase
     /**
      * Starts the server with a prepared dispatcher (e.g. with raw routes).
      */
-    protected function startServerWithDispatcher(RequestDispatcher $dispatcher): void
+    protected function startServerWithDispatcher(RequestDispatcher $dispatcher, int $prewarmConnections = 0): void
     {
         $this->port = random_int(31000, 39999);
         $this->server = Yii::createObject([
@@ -70,6 +70,7 @@ abstract class CompatTestCase extends DatabaseTestCase
             'host' => '127.0.0.1',
             'port' => $this->port,
             'enableSignalHandling' => false,
+            'prewarmConnections' => $prewarmConnections,
             'dispatcher' => $dispatcher,
         ]);
 
