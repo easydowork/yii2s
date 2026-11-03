@@ -1,8 +1,8 @@
 #!/bin/bash
-# Coroutine load baseline (Linux/WSL and macOS).
+# Coroutine load baseline (macOS and Linux).
 #
-#   bash scripts/wsl-bench.sh                         # 100 conns / 5s per path
-#   CONCURRENCY=50 DURATION=3 bash scripts/wsl-bench.sh
+#   bash scripts/bench.sh                         # 100 conns / 5s per path
+#   CONCURRENCY=50 DURATION=3 bash scripts/bench.sh
 #
 # Starts example/ on PORT, benches /, /demo/db and /demo/redis with the
 # built-in keep-alive load generator, prints pool metrics and stops the server.

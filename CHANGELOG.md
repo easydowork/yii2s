@@ -51,21 +51,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **pid file**: per-user temp directory, symlink refusal, 0600 permissions.
 - **SIGTERM** now drains in-flight requests (dedicated shutdown coroutine).
 - **Unhandled request exceptions** are logged instead of only returned.
+- **Dead pooled DB connection poisons the pool**: when MySQL went away
+  (restart / idle timeout), the dead `PDO` was returned to the pool and reused
+  by every following request, so a single restart broke all DB traffic until
+  the process restarted. A new `Db\CoroutineCommand` detects connection-loss
+  errors (SQLSTATE class `08`, or MySQL/MariaDB codes 2006/2013), discards the
+  broken connection and rethrows - the request fails once, the pool recovers
+  on the next borrow (verified by killing the server-side connection mid-test).
 
 ### Changed
 
 - **Production deployment docs corrected**: same-port multi-instance works
   only with a per-instance pid file (the default is keyed by host-port, so the
   start guard rejects the second process). The example config now reads
-  `SWOOLE_PID_FILE`, `scripts/wsl-e2e.sh` starts two instances on one port and
+  `SWOOLE_PID_FILE`, `scripts/e2e.sh` starts two instances on one port and
   asserts both serve, and the docs present both recipes (multi-port + nginx
   upstream as the default, same-port `SO_REUSEPORT` with supervisor-owned
   pid files). Also added the `stopwaitsecs > gracefulTimeout`,
   `client_max_body_size` / `package_max_length`, pool-sizing and health-check
   notes.
-- **`scripts/wsl-e2e.sh` / `scripts/wsl-bench.sh` are portable**: `CLI`,
+- **`scripts/e2e.sh` / `scripts/bench.sh` are portable**: `CLI`,
   `PORT`, `APP_DIR`, `CONCURRENCY`, `DURATION` are configurable and both run on
-  macOS and Linux instead of a hardcoded WSL path.
+  macOS and Linux.
 - **Per-request hot-path trimming**: the dispatcher parses `request_uri` once
   and shares the path across the raw/static/metrics handlers; `RequestStateManager`
   caches the list of pool-owning component ids (rebuilt only when a new
@@ -84,6 +91,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   DI build (~1.5µs saved per object). The prototype is invalidated when
   `Bootstrap` swaps the component class, so the first request still gets the
   coroutine class.
+- **`scripts/soak.php`**: a sustained-load leak detector - drives the server
+  with keep-alive traffic while sampling `/__pool` metrics and (optionally)
+  process RSS, then flags borrowed-connection leaks, pool timeouts and memory
+  drift. Run it after any pool/runtime change to catch leaks before they reach
+  production.
 - **`examples/blog`**: cover uploads (CoroutineUploadedFile), comments with
   moderation, Redis view counter, cached front page with version invalidation,
   queue worker + audit log, CSV export through `sendFile()`, API-key
@@ -240,7 +252,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Request hardening: `secureProtocolHeaders` support, `SameSite` cookie
   forwarding, sensitive-header isolation from process superglobals.
 - Coroutine load generator (`scripts/bench.php`) and Linux verification
-  scripts (`scripts/wsl-e2e.sh`, `scripts/wsl-bench.sh`).
+  scripts (`scripts/e2e.sh`, `scripts/bench.sh`).
 
 ### Fixed
 

@@ -55,8 +55,8 @@ class SwooleController extends Controller
     }
 
     /**
-     * Starts the Swoole HTTP server (blocks until stopped with Ctrl+C, a stop
-     * signal or the stop flag file, e.g. created by `swoole/stop`).
+     * Starts the Swoole HTTP server (blocks until stopped with Ctrl+C or a
+     * SIGTERM, e.g. sent by `swoole/stop`).
      */
     public function actionStart(): int
     {
@@ -112,24 +112,12 @@ class SwooleController extends Controller
 
         $this->stdout("Swoole HTTP server stopped.\n");
 
-        // Watch mode: the watchdog requested this shutdown after detecting
-        // file changes - respawn with the same command line so the new
-        // process loads the fresh code (dev convenience only).
-        if ($this->watch && $server->watchReloadPending) {
-            $command = array_values($_SERVER['argv'] ?? []);
-            if ($command !== [] && $this->respawn($command)) {
-                $this->stdout("Respawned with fresh code.\n");
-                return ExitCode::OK;
-            }
-            $this->stderr("Could not respawn automatically; start again manually.\n");
-            return ExitCode::UNSPECIFIED_ERROR;
-        }
-
         return ExitCode::OK;
     }
 
     /**
-     * Stops a running Swoole HTTP server through its stop flag file.
+     * Stops a running Swoole HTTP server by sending SIGTERM to its master
+     * process (Swoole then gracefully drains the workers).
      */
     public function actionStop(): int
     {
@@ -144,7 +132,10 @@ class SwooleController extends Controller
             return ExitCode::OK;
         }
 
-        $server->requestStop('stop');
+        if (!$this->signal($pidFile, SIGTERM)) {
+            $this->stderr("Failed to signal the server; is it still running?\n");
+            return ExitCode::UNSPECIFIED_ERROR;
+        }
 
         if (!$this->waitForExit($pidFile)) {
             $this->stderr("Server did not stop within the timeout.\n");
@@ -156,9 +147,8 @@ class SwooleController extends Controller
     }
 
     /**
-     * Reloads a running server: graceful stop plus respawn using the original
-     * command line stored in the pid file. On Linux, prefer a process manager
-     * (supervisor/systemd) which restarts the server on SIGTERM exit.
+     * Reloads a running server by sending SIGUSR1 - Swoole's native graceful
+     * worker reload (no process respawn needed).
      */
     public function actionReload(): int
     {
@@ -173,26 +163,12 @@ class SwooleController extends Controller
             return ExitCode::OK;
         }
 
-        $info = $pidFile->read();
-        $command = is_array($info['command'] ?? null) ? $info['command'] : [];
-        if ($command === []) {
-            $this->stderr("Pid file does not contain the original command line; cannot respawn.\n");
+        if (!$this->signal($pidFile, SIGUSR1)) {
+            $this->stderr("Failed to signal the server; is it still running?\n");
             return ExitCode::UNSPECIFIED_ERROR;
         }
 
-        $server->requestStop('reload');
-        if (!$this->waitForExit($pidFile)) {
-            $this->stderr("Server did not stop within the timeout.\n");
-            return ExitCode::UNSPECIFIED_ERROR;
-        }
-
-        if ($this->respawn($command)) {
-            $this->stdout("Swoole HTTP server reloaded.\n");
-        } else {
-            $this->stdout("Server stopped. The process could not be respawned\n");
-            $this->stdout("from PHP (exec/popen are restricted on this system).\n");
-            $this->stdout("Start it again with: " . implode(' ', $command) . "\n");
-        }
+        $this->stdout("Swoole HTTP server reload signal sent.\n");
         return ExitCode::OK;
     }
 
@@ -409,11 +385,24 @@ class SwooleController extends Controller
         }
         if (!$pidFile->isAlive()) {
             $pidFile->remove();
-            $server->getStopFlagFile()->remove();
             return null;
         }
 
         return $pidFile;
+    }
+
+    /**
+     * Sends a signal to the master process recorded in the pid file.
+     */
+    private function signal(PidFile $pidFile, int $signal): bool
+    {
+        $info = $pidFile->read();
+        $pid = (int) ($info['pid'] ?? 0);
+        if ($pid <= 0) {
+            return false;
+        }
+
+        return @posix_kill($pid, $signal);
     }
 
     /**
@@ -432,33 +421,4 @@ class SwooleController extends Controller
         return false;
     }
 
-    /**
-     * Respawns the server detached from the current process using the original
-     * command line. Returns false when process spawning is unavailable (some
-     * systems restrict exec/proc_open from PHP); the caller then tells the
-     * user to start the server manually. On production Linux a process
-     * manager (supervisor/systemd) is the preferred respawn path.
-     *
-     * The stored command is the script invocation without the interpreter
-     * (e.g. `example/yii swoole/start`), so PHP_BINARY is prepended - the
-     * entry script has no shebang and would not execute on its own.
-     *
-     * @param array<int, string> $command
-     */
-    private function respawn(array $command): bool
-    {
-        $commandLine = escapeshellarg(PHP_BINARY) . ' ' . implode(' ', array_map(
-            static fn (string $part): string => escapeshellarg($part),
-            $command
-        ));
-
-        set_error_handler(static fn (): bool => true);
-        try {
-            exec($commandLine . ' > /dev/null 2>&1 &', $output, $exitCode);
-
-            return $exitCode === 0;
-        } finally {
-            restore_error_handler();
-        }
-    }
 }

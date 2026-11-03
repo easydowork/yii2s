@@ -10,16 +10,27 @@ declare(strict_types=1);
 
 namespace Yii2S\Swoole\Server;
 
-use Swoole\Coroutine;
-use Swoole\Coroutine\Http\Server as SwooleCoroutineHttpServer;
-use Swoole\ExitException;
+use Swoole\Http\Server as SwooleHttpServer;
 use Swoole\Process;
 use Yii;
-use Yii2S\Swoole\Runtime\RequestStateManager;
 use yii\base\Component;
 use yii\base\InvalidConfigException;
 use yii\di\Instance;
 
+/**
+ * HTTP server built on the classic multi-process [[Swoole\Http\Server]].
+ *
+ * One master process manages `workerNum` worker processes; each worker runs
+ * its own coroutine scheduler and owns its own copy of the Yii2 application
+ * and its connection pools (so `poolMaxActive` applies **per worker**). A
+ * worker crash is recovered by the master, and graceful reload/shutdown are
+ * provided natively by Swoole (SIGUSR1 / SIGTERM).
+ *
+ * The request lifecycle is otherwise identical to the coroutine server this
+ * class used to wrap: every request is handled inside a coroutine, the
+ * dispatcher rebuilds request-scoped state per request and pooled connections
+ * stay sticky to their coroutine.
+ */
 class HttpServer extends Component
 {
     public const EVENT_BEFORE_START = 'beforeStart';
@@ -32,11 +43,19 @@ class HttpServer extends Component
 
     public int $port = 9501;
 
-    /** @var array<string, mixed> coroutine server settings: backlog, open_tcp_nodelay, max_coroutine, log_level */
+    /** @var array<string, mixed> Swoole server settings: worker_num, backlog,
+     *  open_tcp_nodelay, max_wait_time, package_max_length, log_level, ... */
     public array $settings = [];
 
     /**
-     * @var int how many connections to open per pool before the server starts
+     * @var int number of worker processes; 0 lets Swoole default to the
+     * number of CPU cores. Set explicitly to bound total connections
+     * (each worker owns its own `poolMaxActive`-sized pools).
+     */
+    public int $workerNum = 0;
+
+    /**
+     * @var int how many connections to open per pool before each worker starts
      * accepting traffic (DB/Redis warm-up). 0 only instantiates the pools.
      * Keep it at or below the component's `poolMaxActive`.
      */
@@ -45,27 +64,16 @@ class HttpServer extends Component
     /** @var RequestDispatcherInterface|array|string */
     public $dispatcher;
 
-    /** @var int coroutine hook flags applied when the server starts */
-    public int $hookFlags = SWOOLE_HOOK_ALL;
-
-    /** @var bool whether SIGINT/SIGTERM trigger a graceful shutdown */
+    /** @var bool kept for backward compatibility: [[Swoole\Http\Server]]
+     *  always handles SIGTERM/SIGINT/SIGUSR1 natively. */
     public bool $enableSignalHandling = true;
 
     /** @var string|null pid file path; null resolves to a per-user directory
      *  inside the system temp directory (see [[getPidFile()]]) */
     public $pidFile = null;
 
-    /** @var string|null stop flag file path; null resolves next to the pid file */
-    public $stopFlagFile = null;
-
-    /** @var bool whether to poll the stop flag file - a stop mechanism that
-     *  works from any process (e.g. `swoole/stop` from a separate console)
-     *  without depending on signal permissions */
-    public bool $enableStopFlagWatcher = true;
-
     /** @var bool development-only: watch application files and gracefully
-     *  reload the server when they change. NEVER enable in production -
-     *  the reload respawns the whole process. */
+     *  reload the workers when they change. NEVER enable in production. */
     public bool $watch = false;
 
     /** @var float seconds between watch scans (mtime polling, zero deps) */
@@ -78,40 +86,22 @@ class HttpServer extends Component
     /** @var array<string> directory names skipped by the watch scan */
     public array $watchExcludes = ['runtime', 'vendor', 'node_modules', '.git'];
 
-    /** @var bool set when the *watchdog* (not an external `swoole/reload`)
-     *  requested the current shutdown; consumed by `swoole/start --watch` */
-    public bool $watchReloadPending = false;
-
     /** @var string|null static file root directory (supports Yii aliases);
-     *  when set, Swoole serves existing files directly and missing paths
+     *  when set, static files are served at the PHP level and missing paths
      *  fall through to the Yii2 router */
     public $documentRoot = null;
 
-    /** @var float seconds to wait for in-flight requests to finish during a
-     *  graceful stop before shutting down regardless */
+    /** @var float seconds Swoole waits for workers to finish in-flight
+     *  requests during a reload/shutdown (mapped to `max_wait_time`) */
     public float $gracefulTimeout = 10.0;
 
-    /** @var callable|null optional factory: function (string $host, int $port): SwooleCoroutineHttpServer */
-    public $serverFactory = null;
-
-    private ?SwooleCoroutineHttpServer $server = null;
+    private ?SwooleHttpServer $server = null;
 
     private bool $isRunning = false;
 
     private ?PidFile $pidFileManager = null;
 
-    private ?PidFile $stopFlagFileManager = null;
-
-    /** @var string|null the action ('stop'|'reload') that triggered the shutdown */
-    private ?string $lastStopAction = null;
-
-    /** @var bool whether stop() has been called; lets the watcher coroutine
-     *  exit so that Coroutine\run() is not kept alive by it */
-    private bool $stopRequested = false;
-
-    /** @var bool set by the signal handlers (which must not block) and
-     *  consumed by the shutdown dispatcher coroutine */
-    private bool $shutdownRequested = false;
+    private ?Process $watchdog = null;
 
     public function init(): void
     {
@@ -134,21 +124,14 @@ class HttpServer extends Component
 
         $this->pidFile = $this->resolveAlias($this->pidFile);
         $this->documentRoot = $this->resolveAlias($this->documentRoot);
-        $this->stopFlagFile = $this->resolveAlias($this->stopFlagFile);
 
-        // The coroutine Http\Server ignores Swoole's native static handler,
-        // so static files are served at the PHP level via the dispatcher.
+        // Swoole's native static handler is not used: static files are served
+        // at the PHP level so cache headers and range support stay ours.
         if ($this->documentRoot !== null
             && $this->dispatcher instanceof RequestDispatcher
             && $this->dispatcher->staticRoot === null
         ) {
             $this->dispatcher->staticRoot = $this->documentRoot;
-        }
-
-        if ($this->serverFactory === null) {
-            $this->serverFactory = static function (string $host, int $port): SwooleCoroutineHttpServer {
-                return new SwooleCoroutineHttpServer($host, $port, false, true);
-            };
         }
     }
 
@@ -165,7 +148,7 @@ class HttpServer extends Component
     }
 
     /**
-     * Resolves and creates the file managers. Called lazily so that console
+     * Resolves and creates the pid file manager. Called lazily so that console
      * commands can reuse exactly the same paths as the server process.
      */
     public function getPidFile(): PidFile
@@ -188,43 +171,18 @@ class HttpServer extends Component
 
     /**
      * Effective user id for the default pid file directory; 0 on platforms
-     * without posix (Windows is not a supported target, but do not break).
+     * without posix.
      */
     private function effectiveUid(): int
     {
         return function_exists('posix_geteuid') ? (int) posix_geteuid() : 0;
     }
 
-    public function getStopFlagFile(): PidFile
-    {
-        if ($this->stopFlagFileManager === null) {
-            $path = $this->stopFlagFile ?? $this->getPidFile()->getPath() . '.stop';
-            $this->stopFlagFileManager = new PidFile($path);
-        }
-
-        return $this->stopFlagFileManager;
-    }
-
     /**
-     * Requests a graceful shutdown of a running server by creating the stop
-     * flag file, which the server watches for. Used by the `swoole/stop` and
-     * `swoole/reload` console commands; works cross-platform.
-     *
-     * @param string $action 'stop' or 'reload'
+     * Starts the server. Blocks in the master process until the server shuts
+     * down (SIGTERM/SIGINT, or a programmatic [[stop()]]). Must be called in
+     * the main thread - never inside a coroutine.
      */
-    public function requestStop(string $action = 'stop'): void
-    {
-        $this->getStopFlagFile()->write(['action' => $action, 'requested_at' => time()]);
-    }
-
-    /**
-     * The action that triggered the last shutdown ('stop', 'reload' or null).
-     */
-    public function getLastStopAction(): ?string
-    {
-        return $this->lastStopAction;
-    }
-
     public function start(): void
     {
         if ($this->isRunning) {
@@ -233,226 +191,179 @@ class HttpServer extends Component
 
         $this->trigger(self::EVENT_BEFORE_START);
 
-        Coroutine::set([
-            'hook_flags' => $this->hookFlags,
-            'max_coroutine' => $this->settings['max_coroutine'] ?? 100000,
-        ]);
-
-        $this->lastStopAction = null;
-        $this->stopRequested = false;
-        $this->shutdownRequested = false;
-        $this->writePidFile();
         $this->isRunning = true;
+        $this->writePidFile();
 
-        try {
-            if (\Swoole\Coroutine::getCid() !== -1) {
-                // Already inside a coroutine (embedding/tests): run in place.
-                $this->runServer();
-            } else {
-                Coroutine\run(function (): void {
-                    // The server must own a dedicated coroutine: shutdown()
-                    // called from another coroutine (stop flag watcher) does
-                    // not unblock start() when it runs on the root coroutine.
-                    Coroutine::create(function (): void {
-                        $this->runServer();
-                    });
-                });
-            }
-        } catch (ExitException $e) {
-            // Expected during graceful shutdown.
-        }
-
-        $this->isRunning = false;
-        $this->server = null;
-        $this->getPidFile()->remove();
-        $this->getStopFlagFile()->remove();
-        $this->trigger(self::EVENT_AFTER_STOP);
-    }
-
-    /**
-     * Creates the Swoole server, registers the request handler and blocks
-     * until shutdown. Must be called inside a coroutine.
-     */
-    private function runServer(): void
-    {
-        $this->server = ($this->serverFactory)($this->host, $this->port);
-        $this->applySettings();
-
-        $this->trigger(self::EVENT_AFTER_START);
-
-        if ($this->prewarmConnections > 0) {
-            $this->dispatcher->prewarm($this->prewarmConnections);
-        }
+        // Explicit SWOOLE_PROCESS: a master + worker_num workers. The default
+        // on some builds is SWOOLE_BASE (single process), which neither scales
+        // across cores nor supports graceful reload().
+        $server = new SwooleHttpServer($this->host, $this->port, SWOOLE_PROCESS);
+        $this->server = $server;
+        $this->applySettings($server);
 
         $dispatcher = $this->dispatcher;
-        $server = $this->server;
+        $prewarm = $this->prewarmConnections;
 
-        if ($this->enableSignalHandling) {
-            $this->registerSignalHandlers();
-        }
-        if ($this->enableStopFlagWatcher) {
-            $this->startStopFlagWatcher();
-        }
+        // Every request runs inside a coroutine (Swoole enables this by
+        // default); the dispatcher therefore keeps working unchanged.
+        $server->on('request', static function ($request, $response) use ($dispatcher, $server): void {
+            $dispatcher->dispatch($request, $response, $server);
+        });
+
+        // Each worker owns its own application/pools, so warm them up per
+        // worker, not in the master (channels cannot survive fork). The borrow
+        // loop needs a coroutine; workerStart runs outside one. The warm-up is
+        // best-effort and asynchronous: the worker serves requests immediately
+        // and pays the connect latency only if the warm-up has not finished.
+        $server->on('workerStart', static function () use ($dispatcher, $prewarm): void {
+            if ($prewarm <= 0) {
+                return;
+            }
+            \Swoole\Coroutine::create(static function () use ($dispatcher, $prewarm): void {
+                $dispatcher->prewarm($prewarm);
+            });
+        });
+
         if ($this->watch) {
             $this->startWatchdog();
         }
 
-        $server->handle('/', static function (
-            \Swoole\Http\Request $request,
-            \Swoole\Http\Response $response
-        ) use ($dispatcher, $server): void {
-            $dispatcher->dispatch($request, $response, $server);
-        });
+        $this->trigger(self::EVENT_AFTER_START);
 
-        $server->start();
-    }
-
-    public function stop(): void
-    {
-        // Idempotent: a signal and the stop-flag watcher may both fire.
-        if (!$this->isRunning || $this->server === null || $this->stopRequested) {
-            return;
-        }
-        $this->stopRequested = true;
-
-        // Give in-flight requests a bounded amount of time to finish before
-        // the server stops accepting and processing. Skipping the wait when
-        // not inside a coroutine (signal callbacks on some platforms).
-        if (Coroutine::getCid() !== -1) {
-            $deadline = microtime(true) + $this->gracefulTimeout;
-            while (RequestStateManager::getActiveRequests() > 0 && microtime(true) < $deadline) {
-                Coroutine::sleep(0.05);
+        try {
+            $server->start();
+        } finally {
+            $this->isRunning = false;
+            $this->server = null;
+            if ($this->watchdog !== null) {
+                // The watchdog may already have exited after sending SIGUSR1.
+                @Process::kill($this->watchdog->pid, SIGTERM);
+                $this->watchdog = null;
             }
+            $this->getPidFile()->remove();
+            $this->trigger(self::EVENT_AFTER_STOP);
         }
-
-        $this->server->shutdown();
     }
 
     /**
-     * Whether the server is currently running.
-     *
-     * @phpstan-impure The value changes when the server shuts down from
-     * another coroutine - callers poll it as a state signal.
+     * Requests a graceful shutdown. Only meaningful when called in the master
+     * process; external callers should send SIGTERM (see `swoole/stop`).
      */
+    public function stop(): void
+    {
+        if (!$this->isRunning || $this->server === null) {
+            return;
+        }
+
+        // Give in-flight requests a bounded amount of time to finish; Swoole's
+        // shutdown already waits for workers, this just mirrors the intent of
+        // gracefulTimeout for programmatic stops.
+        $this->server->shutdown();
+    }
+
     public function isRunning(): bool
     {
         return $this->isRunning;
     }
 
     /**
-     * Applies the configured Swoole settings. The coroutine Http\Server
-     * accepts only a subset of the Swoole settings (e.g. backlog,
-     * open_tcp_nodelay, package_max_length for large request bodies);
-     * unknown keys are ignored by Swoole with a warning. Notably
-     * `enable_static_handler` has no effect here - static files are served
-     * by the dispatcher at the PHP level (see [[documentRoot]]).
+     * Applies the configured Swoole settings. Worker count and the graceful
+     * wait are derived from the dedicated properties; user keys win.
      */
-    private function applySettings(): void
+    private function applySettings(SwooleHttpServer $server): void
     {
-        // Unlike the stock Swoole\Http\Server, Coroutine\Http\Server defaults
-        // `http_parse_files` to *false* (swoole_http.h) - multipart uploads
-        // would silently produce an empty $request->files. Also, whether the
-        // other parsers default on varies across builds. Pin them explicitly;
-        // user-configured keys win over these defaults.
+        // The multipart parser defaults differ across Swoole builds; pin them
+        // explicitly so uploads never silently produce an empty $request->files.
         $this->settings += [
             'http_parse_cookie' => true,
             'http_parse_post' => true,
             'http_parse_files' => true,
         ];
 
-        $this->server->set($this->settings);
-    }
-
-    private function registerSignalHandlers(): void
-    {
-        try {
-            foreach ([SIGINT, SIGTERM] as $signal) {
-                Process::signal($signal, function (): void {
-                    // Signal callbacks run in the event loop, outside any
-                    // coroutine; shutdown() blocks. Only raise a flag here and
-                    // let a coroutine run the graceful stop, so supervisor's
-                    // TERM drains in-flight requests instead of killing them.
-                    $this->shutdownRequested = true;
-                });
-            }
-            $this->startShutdownDispatcher();
-        } catch (\Throwable $e) {
-            // Signal handling may be unavailable (pcntl missing); the server
-            // still works, it just cannot shut down gracefully. The stop flag
-            // watcher provides the graceful path in that case.
+        // workerNum 0 means "one worker per CPU core". Swoole's own default
+        // is 1 on some builds, so auto-detect explicitly to honour the
+        // multi-process intent of this server.
+        $this->settings += [
+            'worker_num' => $this->workerNum > 0 ? $this->workerNum : max(1, swoole_cpu_num()),
+        ];
+        if ($this->gracefulTimeout > 0) {
+            // reload_async + max_wait_time together make reload/shutdown wait
+            // for in-flight requests: without reload_async a worker is killed
+            // immediately on the stop signal, dropping requests mid-flight.
+            $this->settings += [
+                'reload_async' => true,
+                'max_wait_time' => (int) $this->gracefulTimeout,
+            ];
         }
+
+        $server->set($this->settings);
     }
 
     /**
-     * Turns the signal flag into a graceful [[stop()]] from a real coroutine.
-     */
-    private function startShutdownDispatcher(): void
-    {
-        Coroutine::create(function (): void {
-            while ($this->isRunning && !$this->stopRequested) {
-                if ($this->shutdownRequested) {
-                    $this->stop();
-                    return;
-                }
-                Coroutine::sleep(0.1);
-            }
-        });
-    }
-
-    /**
-     * Development-only hot reload: polls watched directories for PHP file
-     * changes and triggers a graceful shutdown marked as a watchdog reload.
-     * `swoole/start --watch` consumes [[watchReloadPending]] afterwards and
-     * respawns itself, so the new process picks up the fresh code.
-     *
-     * Plain mtime polling (no inotify/fswatch dependency) works identically
-     * on Linux and macOS; the stat() calls are coroutine-hooked (HOOK_FILE),
-     * so scanning never blocks the event loop.
+     * Development-only hot reload: a dedicated process polls watched
+     * directories and sends SIGUSR1 (Swoole's native graceful reload) to the
+     * master when a PHP file changes. Reload restarts the workers, which pick
+     * up the fresh code on the next request.
      */
     private function startWatchdog(): void
     {
-        Coroutine::create(function (): void {
-            $snapshot = $this->scanWatchFiles();
-            while ($this->isRunning && !$this->stopRequested) {
-                Coroutine::sleep($this->watchInterval);
-                $current = $this->scanWatchFiles();
-                if ($current !== $snapshot) {
-                    $this->stdout(sprintf(
-                        "[%s] file change detected, reloading...\n",
-                        date('H:i:s')
-                    ));
-                    $this->watchReloadPending = true;
-                    $this->stop();
-                    return;
+        $masterPid = getmypid();
+        $watchDirs = $this->watchDirs;
+        $watchExcludes = $this->watchExcludes;
+        $interval = $this->watchInterval;
+
+        $this->watchdog = new Process(
+            static function () use ($masterPid, $watchDirs, $watchExcludes, $interval): void {
+                $scan = static function () use ($watchDirs, $watchExcludes): array {
+                    return HttpServer::scanWatchFiles($watchDirs, $watchExcludes);
+                };
+
+                $snapshot = $scan();
+                $sleepMicros = (int) (max(0.1, $interval) * 1_000_000);
+                while (true) {
+                    usleep($sleepMicros);
+
+                    if (!PidFile::isProcessAlive($masterPid)) {
+                        return; // master exited; nothing left to reload
+                    }
+
+                    if ($scan() !== $snapshot) {
+                        @posix_kill($masterPid, SIGUSR1);
+
+                        return;
+                    }
+
+                    $snapshot = $scan();
                 }
-                $snapshot = $current;
-            }
-        });
+            },
+            false,
+            0,
+            false
+        );
+
+        $this->watchdog->start();
     }
 
     /**
+     * @param array<string> $watchDirs
+     * @param array<string> $watchExcludes
      * @return array<string, int> path => mtime snapshot of watched PHP files
      */
-    private function scanWatchFiles(): array
+    private static function scanWatchFiles(array $watchDirs, array $watchExcludes): array
     {
-        $dirs = $this->watchDirs;
-        if ($dirs === []) {
+        if ($watchDirs === []) {
             $appAlias = Yii::getAlias('@app', false);
             if (!is_string($appAlias)) {
                 return [];
             }
-            $dirs = [$appAlias];
+            $watchDirs = [$appAlias];
         }
 
         $snapshot = [];
-        foreach ($dirs as $dir) {
+        foreach ($watchDirs as $dir) {
             if (!is_dir($dir)) {
                 continue;
             }
-            // The scan runs concurrently with active requests and dev tools
-            // writing files; every filesystem access may hit a file that
-            // vanished (or a warning that Yii's error handler escalates into
-            // an ErrorException mid-request). Never let it fail.
             try {
                 $iterator = new \RecursiveIteratorIterator(
                     new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS),
@@ -465,7 +376,7 @@ class HttpServer extends Component
                     }
                     $path = $file->getPathname();
                     $excluded = false;
-                    foreach ($this->watchExcludes as $name) {
+                    foreach ($watchExcludes as $name) {
                         if (str_contains($path, DIRECTORY_SEPARATOR . $name . DIRECTORY_SEPARATOR)) {
                             $excluded = true;
                             break;
@@ -483,41 +394,6 @@ class HttpServer extends Component
         ksort($snapshot);
 
         return $snapshot;
-    }
-
-    private function stdout(string $message): void
-    {
-        fwrite(STDOUT, $message);
-    }
-
-    /**
-     * Watches for the stop flag file - the cross-process shutdown mechanism
-     * used by `swoole/stop` and `swoole/reload` from a separate console
-     * process. The flag carries the requested action ('stop' or 'reload').
-     *
-     * Implemented as a coroutine polling loop: shutdown() must not be called
-     * from a timer callback (it blocks).
-     */
-    private function startStopFlagWatcher(): void
-    {
-        Coroutine::create(function (): void {
-            // The loop must terminate *before* Coroutine\run() waits for it:
-            // isRunning only flips false after run() returns, so the loop
-            // exits on stopRequested instead to avoid a circular wait.
-            while (!$this->stopRequested && $this->isRunning) {
-                Coroutine::sleep(0.5);
-
-                $flagFile = $this->getStopFlagFile();
-                $data = $flagFile->read();
-                if ($data === null) {
-                    continue;
-                }
-
-                $flagFile->remove();
-                $this->lastStopAction = is_string($data['action'] ?? null) ? $data['action'] : 'stop';
-                $this->stop();
-            }
-        });
     }
 
     private function writePidFile(): void

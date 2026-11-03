@@ -10,22 +10,17 @@ declare(strict_types=1);
 
 namespace yii2stest\server;
 
-use Swoole\Coroutine;
-use Swoole\Coroutine\Http\Client;
-use Yii;
-use Yii2S\Swoole\Server\HttpServer;
-use Yii2S\Swoole\Server\RequestDispatcher;
-use yii2stest\TestCase;
+use yii2stest\ServerTestCase;
 
 /**
- * Development watchdog: watches a directory for PHP file changes and
- * gracefully stops the server with watchReloadPending set (the console
- * layer then respawns itself - out of scope here).
+ * Development watchdog: watches directories for PHP file changes and sends
+ * SIGUSR1 to the master, which gracefully reloads the workers (fresh code,
+ * new worker pid) without dropping the server.
  *
  * @group server
  * @group integration
  */
-class HttpServerWatchTest extends TestCase
+class HttpServerWatchTest extends ServerTestCase
 {
     private string $watchDir;
 
@@ -43,52 +38,34 @@ class HttpServerWatchTest extends TestCase
         parent::tearDown();
     }
 
-    public function testFileChangeTriggersGracefulReloadFlag(): void
+    public function testFileChangeTriggersWorkerReload(): void
     {
         $this->runInCoroutine(function (): void {
-            $port = random_int(26000, 30000);
-            $server = Yii::createObject([
-                'class' => HttpServer::class,
-                'host' => '127.0.0.1',
-                'port' => $port,
-                'enableSignalHandling' => false,
-                'watch' => true,
-                'watchInterval' => 0.2,
-                'watchDirs' => [$this->watchDir],
-                'dispatcher' => new RequestDispatcher(__DIR__ . '/../data/app-form.php'),
+            $this->startServer(__DIR__ . '/../data/app-form.php', [
+                // /pid reports the worker pid so a reload is observable.
+                'rawRoutes' => [['method' => 'GET', 'path' => '/pid', 'type' => 'pid']],
+                'server' => [
+                    'watch' => true,
+                    'watchInterval' => 0.2,
+                    'watchDirs' => [$this->watchDir],
+                ],
             ]);
-
-            Coroutine::create(function () use ($server): void {
-                try {
-                    $server->start();
-                } catch (\Throwable) {
-                }
-            });
-
             try {
-                $this->waitForServer($port);
+                $pid1 = (int) $this->get('/pid')['body'];
+                $this->assertGreaterThan(0, $pid1);
 
-                // Changing a file inside an *excluded* directory must NOT
-                // trigger the watchdog.
+                // Excluded-directory change must NOT trigger a reload.
                 file_put_contents($this->watchDir . '/runtime/noise.php', '<?php return 2;');
-                Coroutine::sleep(0.6);
-                $this->assertTrue($server->isRunning(), 'excluded-directory changes must be ignored');
+                \Swoole\Coroutine::sleep(1.5);
+                $this->assertSame($pid1, (int) $this->get('/pid')['body'], 'excluded-directory changes must be ignored');
 
-                // A real change (new file in a watched dir) must gracefully
-                // stop the server and raise the reload flag.
+                // A real change must reload the worker (new pid, server up).
                 file_put_contents($this->watchDir . '/changed.php', '<?php return 3;');
-                $deadline = microtime(true) + 5;
-                while (microtime(true) < $deadline && $server->isRunning()) {
-                    Coroutine::sleep(0.1);
-                }
-
-                $this->assertFalse($server->isRunning(), 'watchdog must stop the server on file change');
-                $this->assertTrue($server->watchReloadPending, 'watchdog reload must be flagged for respawn');
+                $this->waitFor(function () use ($pid1): bool {
+                    return (int) $this->get('/pid')['body'] !== $pid1;
+                }, 8.0);
             } finally {
-                if ($server->isRunning()) {
-                    $server->stop();
-                }
-                $this->waitFor(fn (): bool => !$server->isRunning());
+                $this->stopServer();
             }
         });
     }
@@ -105,34 +82,5 @@ class HttpServerWatchTest extends TestCase
             $item->isDir() ? @rmdir($item->getPathname()) : @unlink($item->getPathname());
         }
         @rmdir($dir);
-    }
-
-    private function waitForServer(int $port, int $timeoutSeconds = 15): void
-    {
-        $deadline = microtime(true) + $timeoutSeconds;
-        while (microtime(true) < $deadline) {
-            $client = new Client('127.0.0.1', $port);
-            $up = $client->get('/');
-            $client->close();
-            if ($up) {
-                return;
-            }
-            Coroutine::sleep(0.2);
-        }
-
-        $this->fail("Integration server did not come up on port {$port}.");
-    }
-
-    private function waitFor(callable $condition, int $timeoutSeconds = 10): void
-    {
-        $deadline = microtime(true) + $timeoutSeconds;
-        while (microtime(true) < $deadline) {
-            if ($condition()) {
-                return;
-            }
-            Coroutine::sleep(0.05);
-        }
-
-        $this->fail('Condition was not met within the timeout.');
     }
 }

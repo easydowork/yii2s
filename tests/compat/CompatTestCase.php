@@ -12,10 +12,8 @@ namespace yii2stest\compat;
 
 use Swoole\Coroutine;
 use Swoole\Coroutine\Http\Client;
-use Yii;
-use Yii2S\Swoole\Server\HttpServer;
-use Yii2S\Swoole\Server\RequestDispatcher;
 use yii2stest\DatabaseTestCase;
+use yii2stest\ServerProcessTrait;
 
 /**
  * Boots a real Swoole HTTP server around tests/data/app-compat.php and speaks
@@ -27,14 +25,12 @@ use yii2stest\DatabaseTestCase;
  */
 abstract class CompatTestCase extends DatabaseTestCase
 {
+    use ServerProcessTrait;
+
     protected $driverName = 'mysql';
 
     /** @var array<string, string> cookie jar: name => raw value */
     protected array $cookies = [];
-
-    private ?HttpServer $server = null;
-
-    protected int $port = 0;
 
     protected function setUp(): void
     {
@@ -46,56 +42,25 @@ abstract class CompatTestCase extends DatabaseTestCase
 
     protected function tearDown(): void
     {
-        $this->server = null;
+        $this->stopServerProcess();
         $this->cookies = [];
         parent::tearDown();
     }
 
     /**
-     * Starts the server inside the current coroutine.
+     * Starts the server subprocess on a random port and waits until it accepts
+     * requests. Must be called inside a coroutine (runInCoroutine).
+     *
+     * @param array<string, mixed> $options "dispatcher" / "rawRoutes" / "server" keys
      */
-    protected function startServer(string $config = 'app-compat.php'): void
+    protected function startServer(string $config = 'app-compat.php', array $options = []): void
     {
-        $this->startServerWithDispatcher(new RequestDispatcher(__DIR__ . '/../data/' . $config));
-    }
-
-    /**
-     * Starts the server with a prepared dispatcher (e.g. with raw routes).
-     */
-    protected function startServerWithDispatcher(RequestDispatcher $dispatcher, int $prewarmConnections = 0): void
-    {
-        $this->port = random_int(31000, 39999);
-        $this->server = Yii::createObject([
-            'class' => HttpServer::class,
-            'host' => '127.0.0.1',
-            'port' => $this->port,
-            'enableSignalHandling' => false,
-            'prewarmConnections' => $prewarmConnections,
-            'dispatcher' => $dispatcher,
-        ]);
-
-        $server = $this->server;
-        Coroutine::create(static function () use ($server): void {
-            try {
-                $server->start();
-            } catch (\Throwable) {
-                // Server internals may throw while shutting down.
-            }
-        });
-
-        $this->waitForServer();
+        $this->startServerProcess(__DIR__ . '/../data/' . $config, $options);
     }
 
     protected function stopServer(): void
     {
-        $server = $this->server;
-        if ($server === null) {
-            return;
-        }
-
-        $server->stop();
-        $this->waitFor(static fn (): bool => !$server->isRunning());
-        $this->server = null;
+        $this->stopServerProcess();
     }
 
     /**
@@ -251,22 +216,6 @@ abstract class CompatTestCase extends DatabaseTestCase
         }
 
         return '';
-    }
-
-    protected function waitForServer(int $timeoutSeconds = 15): void
-    {
-        $deadline = microtime(true) + $timeoutSeconds;
-        while (microtime(true) < $deadline) {
-            $client = new Client('127.0.0.1', $this->port);
-            $up = $client->get('/compat/index');
-            $client->close();
-            if ($up) {
-                return;
-            }
-            Coroutine::sleep(0.05);
-        }
-
-        $this->fail("Compat server did not come up on port {$this->port}.");
     }
 
     protected function waitFor(callable $condition, float $timeoutSeconds = 10.0): void

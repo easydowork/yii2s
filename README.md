@@ -8,9 +8,12 @@
 {"app":"yii2s-example","engine":"swoole-coroutine","php":"8.5.4","swoole":"6.2.4","pid":757,"cid":5}
 ```
 
-基准数据（Linux，WSL2 Ubuntu + swoole-cli，单进程，keep-alive）：纯框架 **13706 QPS**（p50 7.2ms）/
-带 DB 查询 **2829 QPS** / 带 Redis **5823 QPS**，连接池 14144 次借用零超时零泄漏，
-详见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md) 的压测章节。
+基准数据（macOS + swoole-cli，12 worker 多进程，keep-alive，50 并发 3s）：纯框架
+**21769 QPS**（p50 1.44ms）/ 带 DB 查询 **6790 QPS** / 带 Redis **7459 QPS**，
+连接池零超时零泄漏，详见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md) 的压测章节。
+
+上生产前的工程硬化计划（观测/连接池健康/降级熔断/多实例/发布）见
+[`doc/ROADMAP.md`](doc/ROADMAP.md)。
 
 ---
 
@@ -19,7 +22,7 @@
 | 依赖 | 版本 |
 |---|---|
 | PHP | >= 8.2（实测 8.4 / 8.5；Swoole 6 的 PHP 下限即 8.2） |
-| ext-swoole | ^6.0（协程 Http Server + 连接池） |
+| ext-swoole | ^6.0（Swoole Http Server + 连接池） |
 | yiisoft/yii2 | ^2.0 |
 | ext-redis | 原生 phpredis，使用 `redis`/`cache`/`session`/`queue` 组件时必需（`yii2-redis` 是纯 PHP 客户端，不提供 `\Redis`） |
 | MySQL / Redis | 可选，按使用的组件而定 |
@@ -27,7 +30,7 @@
 > **目标平台是 Linux**（生产环境）；macOS 可开发（pecl 编译安装即可）。
 > 两种安装方式：标准 `pecl install swoole`，或
 > [swoole-cli](https://www.swoole.com/page/download)（自带全部扩展的独立二进制，
-> 免配置，Linux 上开箱即用）。不支持 Windows 原生运行。
+> 免配置，Linux 上开箱即用）。
 
 ## 安装
 
@@ -154,7 +157,7 @@ DB 的事务也都原生支持（连接在协程内粘性借用）。
 健康检查、指标、极简只读接口这类请求，可以注册 **raw 路由**：命中后**不创建 Yii 的
 request/response**，直接写回 Swoole 响应。同一台机器、同一个 `ab` 客户端实测：
 
-| 路径 | QPS（单进程） |
+| 路径 | QPS（单 worker，同机 ab -k） |
 |---|---|
 | raw 路由 `/ping` | **55,000 – 62,000** |
 | 完整 Yii 路由 `/` | 14,200 – 15,000 |
@@ -244,14 +247,21 @@ nginx upstream、真实客户端 IP（`trustedProxies`）、超时、上传大�
 # 连接池指标（默认关闭；RequestDispatcher 配置 enablePoolMetricsEndpoint => true 开启）
 curl http://127.0.0.1:9501/__pool
 
+# Prometheus 指标（默认关闭；配置 enableMetricsEndpoint => true 开启）
+# 请求量/状态码、耗时直方图、池状态、进程内存/协程数
+curl http://127.0.0.1:9501/metrics
+
 # 内置压测器（协程，无需 wrk/ab）
 swoole-cli scripts/bench.php --path=/demo/db --concurrency=100 --duration=5
+
+# 长跑检漏：持续压测 + 采样 RSS/连接池漂移
+swoole-cli scripts/soak.php --path=/demo/db --duration=60 --pid=<server pid>
 ```
 
 ## 架构一览
 
 ```
-请求 → Swoole 协程 Http\Server（单进程多协程；多实例 = 多端口 + nginx upstream）
+请求 → Swoole Http\Server（多进程多协程，worker_num = CPU 核数；多实例 = 多端口 + nginx upstream）
      → RequestDispatcher（静态文件 / /__pool / Yii2）
      → 常驻 Yii2 Application（进程内只创建一次，CoroutineApplication）
         ├─ request/response/session/user：每协程独立实例（并发请求互不可见）
@@ -268,7 +278,7 @@ swoole-cli scripts/bench.php --path=/demo/db --concurrency=100 --duration=5
 ## 已知限制
 
 - 需要 `urlManager.enablePrettyUrl = true`（`?r=` 路由依赖 `$_GET`，协程不安全）
-- 协程版 `Http\Server` 不支持 Swoole 原生 `enable_static_handler`，静态文件走 PHP 层
+- `Http\Server` 不使用 Swoole 原生 `enable_static_handler`，静态文件走 PHP 层
   （`documentRoot`，开发用）或交给 nginx（生产推荐）
 - 不要在常驻进程中使用 `$_SESSION`/`header()`/`setcookie()` 等超全局/过程式 API，
   一律走 `Yii::$app->request/response/session`
@@ -300,8 +310,8 @@ swoole-cli scripts/bench.php --path=/demo/db --concurrency=100 --duration=5
 
 ## 开发与测试
 
-目标平台 Linux；测试可在 Linux/WSL2 与 macOS（swoole-cli）上完整运行，
-全量 167 tests / 741 assertions（2 skipped）全绿（macOS + swoole-cli 6.2.0 /
+目标平台 Linux；测试可在 Linux 与 macOS（swoole-cli）上完整运行，
+全量 172 tests / 747 assertions（2 skipped）全绿（macOS + swoole-cli 6.2.0 /
 PHP 8.4 实测；CI 同源的 pecl 构建跑同一套用例）。
 其中 `tests/compat/` 是按功能点组织的迁移兼容性套件（路由、请求、响应格式、
 Cookie、CSRF、会话、登录、Flash、上传、下载、错误处理、常驻服务、并发隔离），
@@ -314,13 +324,13 @@ composer cs      # php-cs-fixer（与官方 yii2 同规则）
 
 # 进程级端到端（start/status/reload 真实 respawn/SIGTERM）与基准：
 # 两个脚本都支持 macOS/Linux，可用 CLI/PORT/APP_DIR/CONCURRENCY/DURATION 覆盖
-bash scripts/wsl-e2e.sh
-bash scripts/wsl-bench.sh   # 本机基线见下方说明
+bash scripts/e2e.sh
+bash scripts/bench.sh   # 本机基线见下方说明
 
-# macOS + swoole-cli 6.2.0 / PHP 8.4，50 并发 3s，0 错误、池零超时：
-#   /            8148 QPS (p50 4.2ms)
-#   /demo/db     3330 QPS (p50 10.0ms)
-#   /demo/redis  3616 QPS (p50 9.0ms)
+# macOS + swoole-cli，12 worker 多进程，50 并发 3s，0 错误、池零超时：
+#   /            21769 QPS (p50 1.44ms)
+#   /demo/db     6790 QPS  (p50 4.37ms)
+#   /demo/redis  7459 QPS  (p50 4.24ms)
 ```
 
 标准 pecl 构建的安装与复现步骤见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md) 验证状态一节。

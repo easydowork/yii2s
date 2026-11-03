@@ -10,43 +10,22 @@ declare(strict_types=1);
 
 namespace yii2stest\server;
 
-use Swoole\Coroutine;
 use Swoole\Coroutine\Http\Client;
-use Yii;
-use Yii2S\Swoole\Server\HttpServer;
-use Yii2S\Swoole\Server\RequestDispatcher;
-use yii2stest\TestCase;
+use yii2stest\ServerTestCase;
 
 /**
  * @group server
  * @group integration
  */
-class HttpServerFormTest extends TestCase
+class HttpServerFormTest extends ServerTestCase
 {
     public function testFormUrlencodedJsonAndMultipartUpload(): void
     {
         $this->runInCoroutine(function (): void {
-            $port = random_int(26000, 30000);
-            $server = Yii::createObject([
-                'class' => HttpServer::class,
-                'host' => '127.0.0.1',
-                'port' => $port,
-                'enableSignalHandling' => false,
-                'dispatcher' => new RequestDispatcher(__DIR__ . '/../data/app-form.php'),
-            ]);
-
-            Coroutine::create(function () use ($server): void {
-                try {
-                    $server->start();
-                } catch (\Throwable) {
-                }
-            });
-
+            $this->startServer(__DIR__ . '/../data/app-form.php');
             try {
-                $this->waitForServer($port);
-
                 // 1. urlencoded form fields.
-                $client = new Client('127.0.0.1', $port);
+                $client = new Client('127.0.0.1', $this->port);
                 $this->assertTrue($client->post('/site/echo', ['field' => 'v1', 'num' => '42']));
                 $this->assertSame(200, $client->statusCode);
                 $body = json_decode((string) $client->body, true);
@@ -55,7 +34,7 @@ class HttpServerFormTest extends TestCase
                 $client->close();
 
                 // 2. JSON body.
-                $client = new Client('127.0.0.1', $port);
+                $client = new Client('127.0.0.1', $this->port);
                 $client->setHeaders(['Content-Type' => 'application/json']);
                 $this->assertTrue($client->post('/site/echo', json_encode(['j' => ['k' => 'v']], JSON_THROW_ON_ERROR)));
                 $this->assertSame(200, $client->statusCode);
@@ -68,7 +47,7 @@ class HttpServerFormTest extends TestCase
                 $tmpFile = tempnam(sys_get_temp_dir(), 'upl');
                 file_put_contents($tmpFile, $payload);
 
-                $client = new Client('127.0.0.1', $port);
+                $client = new Client('127.0.0.1', $this->port);
                 $client->addFile($tmpFile, 'upload', 'application/octet-stream', 'upload-test-file.bin');
                 $this->assertTrue($client->post('/site/upload', ['meta' => 'upload-test']));
                 $this->assertSame(200, $client->statusCode, (string) $client->body);
@@ -91,7 +70,7 @@ class HttpServerFormTest extends TestCase
                 file_put_contents($tmpA, $payloadA);
                 file_put_contents($tmpB, $payloadB);
 
-                $client = new Client('127.0.0.1', $port);
+                $client = new Client('127.0.0.1', $this->port);
                 $client->addFile($tmpA, 'files[0]', 'application/octet-stream', 'a.bin');
                 $client->addFile($tmpB, 'files[1]', 'application/octet-stream', 'b.bin');
                 $this->assertTrue($client->post('/site/upload', ['kind' => 'multi']));
@@ -106,40 +85,8 @@ class HttpServerFormTest extends TestCase
                 unlink($tmpA);
                 unlink($tmpB);
             } finally {
-                $server->stop();
-                $this->waitFor(fn (): bool => !$server->isRunning());
+                $this->stopServer();
             }
-
-            $this->assertFalse($server->isRunning());
         });
-    }
-
-    private function waitForServer(int $port, int $timeoutSeconds = 15): void
-    {
-        $deadline = microtime(true) + $timeoutSeconds;
-        while (microtime(true) < $deadline) {
-            $client = new Client('127.0.0.1', $port);
-            $up = $client->get('/');
-            $client->close();
-            if ($up) {
-                return;
-            }
-            Coroutine::sleep(0.2);
-        }
-
-        $this->fail("Integration server did not come up on port {$port}.");
-    }
-
-    private function waitFor(callable $condition, int $timeoutSeconds = 10): void
-    {
-        $deadline = microtime(true) + $timeoutSeconds;
-        while (microtime(true) < $deadline) {
-            if ($condition()) {
-                return;
-            }
-            Coroutine::sleep(0.05);
-        }
-
-        $this->fail('Condition was not met within the timeout.');
     }
 }

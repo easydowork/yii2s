@@ -1,8 +1,8 @@
 #!/bin/bash
-# Server lifecycle end-to-end test (Linux/WSL and macOS).
+# Server lifecycle end-to-end test (macOS and Linux).
 #
-#   bash scripts/wsl-e2e.sh            # example/ on port 9601
-#   PORT=9701 APP_DIR=/path bash scripts/wsl-e2e.sh
+#   bash scripts/e2e.sh            # example/ on port 9601
+#   PORT=9701 APP_DIR=/path bash scripts/e2e.sh
 #
 # Verifies: start, health, `swoole/status`, `swoole/reload` (real respawn,
 # pid changes), SIGTERM graceful stop and pid-file cleanup.

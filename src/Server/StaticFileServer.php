@@ -121,7 +121,7 @@ class StaticFileServer
         // request coroutine (DoS).
         $path = urldecode($path);
 
-        // Reject null bytes (path truncation) and backslashes (Windows-style
+        // Reject null bytes (path truncation) and backslashes (alternate path
         // separators that pathinfo()/realpath() treat inconsistently).
         if (!str_starts_with($path, '/') || str_contains($path, "\0") || str_contains($path, '\\')) {
             return false;

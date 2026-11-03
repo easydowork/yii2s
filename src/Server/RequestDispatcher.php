@@ -16,7 +16,7 @@ use Yii2S\Swoole\Runtime\CoroutineRequest;
 use Yii2S\Swoole\Runtime\CoroutineResponse;
 use Yii2S\Swoole\Runtime\RequestStateManager;
 use Yii2S\Swoole\Runtime\SwooleResponseSender;
-use Swoole\Coroutine\Http\Server as SwooleCoroutineHttpServer;
+use Swoole\Http\Server as SwooleHttpServer;
 use Swoole\Http\Request;
 use Swoole\Http\Response;
 use Throwable;
@@ -58,6 +58,18 @@ class RequestDispatcher implements RequestDispatcherInterface
      */
     public string $poolMetricsPath = '/__pool';
 
+    /**
+     * @var bool whether to expose the Prometheus metrics endpoint
+     * ([[metricsPath]]). Keep it disabled on public deployments or block the
+     * path at the reverse proxy.
+     */
+    public bool $enableMetricsEndpoint = false;
+
+    /**
+     * @var string request path of the Prometheus metrics endpoint
+     */
+    public string $metricsPath = '/metrics';
+
     private ?WebApplication $application = null;
 
     private ?StaticFileServer $staticFileServer = null;
@@ -65,6 +77,8 @@ class RequestDispatcher implements RequestDispatcherInterface
     private SwooleResponseSender $responseSender;
 
     private RequestStateManager $stateManager;
+
+    private RequestMetrics $requestMetrics;
 
     /**
      * @var array<string, callable> raw routes keyed by "METHOD /path"
@@ -84,8 +98,13 @@ class RequestDispatcher implements RequestDispatcherInterface
         if (isset($config['poolMetricsPath']) && is_string($config['poolMetricsPath'])) {
             $this->poolMetricsPath = $config['poolMetricsPath'];
         }
+        $this->enableMetricsEndpoint = (bool) ($config['enableMetricsEndpoint'] ?? $this->enableMetricsEndpoint);
+        if (isset($config['metricsPath']) && is_string($config['metricsPath'])) {
+            $this->metricsPath = $config['metricsPath'];
+        }
         $this->responseSender = $config['responseSender'] ?? new SwooleResponseSender();
         $this->stateManager = $config['stateManager'] ?? new RequestStateManager();
+        $this->requestMetrics = $config['requestMetrics'] ?? new RequestMetrics();
     }
 
     /**
@@ -126,6 +145,45 @@ class RequestDispatcher implements RequestDispatcherInterface
                 ['pools' => $pools],
                 JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES
             ));
+        }
+
+        return true;
+    }
+
+    /**
+     * Serves the Prometheus metrics endpoint when enabled. Runs before the
+     * request enters the Yii lifecycle; it only reads counters and pool state
+     * and never borrows a connection.
+     */
+    private function tryServeMetrics(Request $swooleRequest, Response $swooleResponse, ?string $path = null): bool
+    {
+        if (!$this->enableMetricsEndpoint) {
+            return false;
+        }
+        if ($path === null) {
+            $parsed = parse_url((string) ($swooleRequest->server['request_uri'] ?? ''), PHP_URL_PATH);
+            if (!is_string($parsed)) {
+                return false;
+            }
+            $path = $parsed;
+        }
+        if (rtrim($path, '/') !== $this->metricsPath) {
+            return false;
+        }
+
+        $pools = [];
+        foreach (PoolMetricsCollector::collect($this->getApplication()) as $id => $pool) {
+            try {
+                $pools[$id] = $pool->getMetrics();
+            } catch (\Throwable) {
+                // A broken pool must not break the metrics endpoint.
+            }
+        }
+
+        if ($swooleResponse->isWritable()) {
+            $swooleResponse->status(200);
+            $swooleResponse->header('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+            $swooleResponse->end($this->requestMetrics->render($pools));
         }
 
         return true;
@@ -174,6 +232,14 @@ class RequestDispatcher implements RequestDispatcherInterface
     public function getRawRoutes(): array
     {
         return $this->rawRoutes;
+    }
+
+    /**
+     * @return RequestMetrics the request metrics collector (for tests/inspection)
+     */
+    public function getRequestMetrics(): RequestMetrics
+    {
+        return $this->requestMetrics;
     }
 
     /**
@@ -230,57 +296,74 @@ class RequestDispatcher implements RequestDispatcherInterface
         }
     }
 
-    public function dispatch(Request $swooleRequest, Response $swooleResponse, SwooleCoroutineHttpServer $server): void
+    public function dispatch(Request $swooleRequest, Response $swooleResponse, SwooleHttpServer $server): void
     {
-        // Parse the path once for the three pre-Yii handlers; when none of
-        // them is enabled the parse is skipped entirely.
-        $path = null;
-        if ($this->rawRoutes !== [] || $this->staticRoot !== null || $this->enablePoolMetricsEndpoint) {
-            $parsed = parse_url((string) ($swooleRequest->server['request_uri'] ?? ''), PHP_URL_PATH);
-            $path = is_string($parsed) ? $parsed : null;
-        }
-
-        // Static files and the metrics endpoint run outside the Yii request
-        // lifecycle. A malformed path must never escape as an uncaught
-        // exception: inside a coroutine that terminates the worker.
-        try {
-            if ($path !== null && $this->rawRoutes !== [] && $this->tryRawRoute($swooleRequest, $swooleResponse, $path)) {
-                return;
-            }
-
-            if ($path !== null && $this->tryServeStaticFile($swooleRequest, $swooleResponse, $path)) {
-                return;
-            }
-
-            if ($path !== null && $this->tryServePoolMetrics($swooleRequest, $swooleResponse, $path)) {
-                return;
-            }
-        } catch (Throwable $exception) {
-            Yii::error('Pre-dispatch request handling failed: ' . $exception->getMessage(), __METHOD__);
-            if (!$swooleResponse->isWritable()) {
-                return;
-            }
-        }
-
-        $app = $this->getApplication();
-        $this->stateManager->beginRequest();
+        $start = hrtime(true);
+        $this->requestMetrics->beginRequest();
+        $statusCode = 200;
 
         try {
-            $request = $app->getRequest();
-            if ($request instanceof CoroutineRequest) {
-                $request->setSwooleRequest($swooleRequest);
+            // Parse the path once for the pre-Yii handlers; when none of them
+            // is enabled the parse is skipped entirely.
+            $path = null;
+            if ($this->rawRoutes !== [] || $this->staticRoot !== null || $this->enablePoolMetricsEndpoint || $this->enableMetricsEndpoint) {
+                $parsed = parse_url((string) ($swooleRequest->server['request_uri'] ?? ''), PHP_URL_PATH);
+                $path = is_string($parsed) ? $parsed : null;
             }
 
-            $response = $app->handleRequest($request);
-            if ($response instanceof CoroutineResponse && !$response->isSent) {
-                $response->finalize();
+            // Static files and the metrics endpoints run outside the Yii
+            // request lifecycle. A malformed path must never escape as an
+            // uncaught exception: inside a coroutine that terminates the worker.
+            try {
+                if ($path !== null && $this->rawRoutes !== [] && $this->tryRawRoute($swooleRequest, $swooleResponse, $path)) {
+                    return;
+                }
+
+                if ($path !== null && $this->tryServeStaticFile($swooleRequest, $swooleResponse, $path)) {
+                    return;
+                }
+
+                if ($path !== null && $this->tryServePoolMetrics($swooleRequest, $swooleResponse, $path)) {
+                    return;
+                }
+
+                if ($path !== null && $this->tryServeMetrics($swooleRequest, $swooleResponse, $path)) {
+                    return;
+                }
+            } catch (Throwable $exception) {
+                Yii::error('Pre-dispatch request handling failed: ' . $exception->getMessage(), __METHOD__);
+                if (!$swooleResponse->isWritable()) {
+                    return;
+                }
             }
 
-            $this->responseSender->send($swooleResponse, $response);
-        } catch (Throwable $exception) {
-            $this->handleException($swooleResponse, $exception);
+            $app = $this->getApplication();
+            $this->stateManager->beginRequest();
+
+            try {
+                $request = $app->getRequest();
+                if ($request instanceof CoroutineRequest) {
+                    $request->setSwooleRequest($swooleRequest);
+                }
+
+                $response = $app->handleRequest($request);
+                if ($response instanceof CoroutineResponse && !$response->isSent) {
+                    $response->finalize();
+                }
+
+                $this->responseSender->send($swooleResponse, $response);
+                $statusCode = $response->statusCode ?? 200;
+            } catch (Throwable $exception) {
+                $statusCode = $this->handleException($swooleResponse, $exception);
+            } finally {
+                $this->stateManager->cleanup($app);
+            }
         } finally {
-            $this->stateManager->cleanup($app);
+            $this->requestMetrics->record(
+                (hrtime(true) - $start) / 1_000_000_000.0,
+                $statusCode,
+                strtoupper((string) ($swooleRequest->server['request_method'] ?? 'GET'))
+            );
         }
     }
 
@@ -379,7 +462,7 @@ class RequestDispatcher implements RequestDispatcherInterface
         return $this->application;
     }
 
-    private function handleException(Response $swooleResponse, Throwable $exception): void
+    private function handleException(Response $swooleResponse, Throwable $exception): int
     {
         // Exceptions never reach Yii's own error handler here (the request is
         // handled manually), so log them explicitly - otherwise failed
@@ -400,7 +483,7 @@ class RequestDispatcher implements RequestDispatcherInterface
         }
 
         if (!$swooleResponse->isWritable()) {
-            return;
+            return $this->resolveStatusCode($exception);
         }
 
         // Render through the application's error handler (errorAction / custom
@@ -418,13 +501,14 @@ class RequestDispatcher implements RequestDispatcherInterface
             try {
                 $this->responseSender->send($swooleResponse, $errorResponse);
 
-                return;
+                return $errorResponse->statusCode;
             } catch (Throwable) {
                 // Fall through to the plain-text response below.
             }
         }
 
-        $swooleResponse->status($this->resolveStatusCode($exception));
+        $status = $this->resolveStatusCode($exception);
+        $swooleResponse->status($status);
         $swooleResponse->header('Content-Type', 'text/plain; charset=UTF-8');
 
         if (YII_DEBUG) {
@@ -436,6 +520,8 @@ class RequestDispatcher implements RequestDispatcherInterface
         }
 
         $swooleResponse->end($body);
+
+        return $status;
     }
 
     /**

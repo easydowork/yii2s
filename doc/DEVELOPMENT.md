@@ -25,14 +25,13 @@
 | 依赖 | 版本 |
 |---|---|
 | PHP | >= 8.2（实测 8.4 / 8.5；Swoole 6 的 PHP 下限即 8.2） |
-| ext-swoole | ^6.0（协程 Http Server + 连接池） |
+| ext-swoole | ^6.0（Swoole Http Server + 连接池） |
 | yiisoft/yii2 | ^2.0 |
 | MySQL / Redis | 可选，按使用的组件而定 |
 
 > **目标平台是 Linux**（生产环境）；macOS 可开发（pecl 编译安装即可）。
 > 两种安装方式：标准 `pecl install swoole`，或
 > [swoole-cli](https://www.swoole.com/page/download)（自带全部扩展的独立二进制）。
-> 不支持 Windows 原生运行。
 
 ## 1.2 五分钟跑起来（example 目录）
 
@@ -391,11 +390,11 @@ supervisor: SIGTERM           控制台: php yii swoole/stop
 | 单个 PDO 连接不能被多个协程并发使用 | 连接池 + **协程粘性借用**：每个协程借一条独立连接，事务期间强绑定 |
 | 长生命周期对象持有请求状态（request/response/user） | `CoroutineApplication` 按**协程**从配置定义创建四个组件（并发互不可见）；请求结束由 `RequestStateManager` 归还池连接、sweep、flush 日志 |
 | 池耗尽的错误路径 | 阻塞等待 + `waitTimeout` 超时抛异常，不无限等待；`poolMaxActive` 是并发硬边界 |
-| 泄漏回收机制 | `sweep()`（每请求结束由活跃协程同步执行）而非 `Coroutine::defer`——defer 阶段做 channel IO 在 Windows 构建实测崩溃，且 sweep 确定性更强 |
-| 借出登记数据结构 | 普通数组（`spl_object_id` 索引）而非 WeakMap——msys2 构建 WeakMap 跨协程写入不可见且会崩进程（独立脚本实锤） |
+| 泄漏回收机制 | `sweep()`（每请求结束由活跃协程同步执行）而非 `Coroutine::defer`——defer 阶段做 channel IO 实测会崩溃，且 sweep 确定性更强 |
+| 借出登记数据结构 | 普通数组（`spl_object_id` 索引）而非 WeakMap——WeakMap 跨协程写入不可见且会崩进程（独立脚本实锤） |
 | 多进程模型 | 多端口 + nginx upstream（默认推荐），或同端口 `SO_REUSEPORT`（每实例独立 `pidFile`，示例支持 `SWOOLE_PID_FILE`）；控制命令按单 pid 文件操作，多实例由 supervisor 管；进程内 fork 需重验证进程级状态隔离，不做 |
-| 静态文件 | PHP 层 `StaticFileServer`（可执行/敏感扩展黑名单 + dotfile 拦截）——**实测协程 `Http\Server` 完全忽略 `enable_static_handler`**；生产推荐 nginx 直出 |
-| 请求体解析 | 显式 pin `http_parse_files/post/cookie = true`——协程 `Http\Server` 的 `http_parse_files` 源码默认 **false**（`swoole_http.h`），不显式配置则上传静默为空 |
+| 静态文件 | PHP 层 `StaticFileServer`（可执行/敏感扩展黑名单 + dotfile 拦截）——**实测 `Http\Server` 完全忽略 `enable_static_handler`**；生产推荐 nginx 直出 |
+| 请求体解析 | 显式 pin `http_parse_files/post/cookie = true`——`Http\Server` 的 `http_parse_files` 源码默认 **false**（`swoole_http.h`），不显式配置则上传静默为空 |
 | respawn 前置 `PHP_BINARY` | pid 文件存无解释器的脚本调用（入口无 shebang），不前置则 reload 永远失败（实测） |
 | console `--host/--port` 用 controller 公共属性 | Yii2 匿名选项只赋值 controller 公共属性，不映射 action 方法参数 |
 
@@ -531,7 +530,7 @@ supervisor/systemd 托管。
 >
 > `swoole/stop`/`status`/`reload` 按单个 pid 文件操作，这种模式下由 supervisor
 > 管生命周期；要用控制台命令管理多实例，仍推荐多端口 + upstream。
-> `scripts/wsl-e2e.sh` 已覆盖“两实例同端口、都返回 200”的回归。
+> `scripts/e2e.sh` 已覆盖“两实例同端口、都返回 200”的回归。
 
 ```nginx
 upstream yii2s {
@@ -621,41 +620,43 @@ stopwaitsecs=25                 ; 必须大于 gracefulTimeout(10s)
 # 连接池指标（默认关闭；RequestDispatcher 配置 enablePoolMetricsEndpoint => true 开启）
 curl http://127.0.0.1:9501/__pool
 
+# Prometheus 指标（默认关闭；配置 enableMetricsEndpoint => true 开启）
+curl http://127.0.0.1:9501/metrics
+
 # 内置压测器（协程，无需 wrk/ab）
 swoole-cli scripts/bench.php --path=/demo/db --concurrency=100 --duration=5
+
+# 长跑检漏：持续压测 + 采样 RSS/连接池漂移
+swoole-cli scripts/soak.php --path=/demo/db --duration=60 --pid=<server pid>
 ```
+
+Prometheus 指标（`enableMetricsEndpoint => true`）按 RED 方法暴露：`yii2s_http_requests_total`
+（method + status 计数）、`yii2s_http_request_duration_seconds`（method 维度直方图）、
+`yii2s_http_requests_in_progress`、`yii2s_pool_*`（按 pool 标签）、`yii2s_process_memory_bytes` /
+`yii2s_process_coroutines`。端点默认关闭，生产上要像 `/__pool` 一样只在内网开启或在反向代理层拦截。
 
 ## 4.4 压测基准
 
-`scripts/bench.php` 是内置的协程压测器（无外部依赖）。环境：单进程 Swoole HTTP 服务器，
-客户端与服务器同机（数字偏保守），keep-alive，预热 1s 不计入。
+`scripts/bench.php` 是内置的协程压测器（无外部依赖）。环境：`Swoole\Http\Server`
+多进程（12 worker），客户端与服务器同机（数字偏保守），keep-alive，预热 1s 不计入。
 
-**Windows**（msys2 swoole-cli）：
-
-| 端点 | 并发 | QPS | p50 | p99 | 说明 |
-|---|---|---|---|---|---|
-| `/`（纯框架） | 100 | 8132 | 9.7ms | 19.9ms | 路由+JSON 序列化 |
-| `/demo/db`（2 条 SQL） | 100 | 2384 | 33.4ms | 43.7ms | 连接池借还 |
-| `/demo/redis`（3 命令） | 100 | 2851 | 27.9ms | 33.5ms | 池化 Redis |
-
-**Linux**（WSL2 Ubuntu 26.04 + 原生 swoole-cli，同一负载生成器）：
+**macOS**（swoole-cli，50 并发 3s）：
 
 | 端点 | 并发 | QPS | p50 | p95 | p99 |
 |---|---|---|---|---|---|
-| `/`（纯框架） | 100 | **13706** | 7.2ms | 9.6ms | 11.2ms |
-| `/demo/db`（2 条 SQL） | 100 | **2829** | 35.3ms | 39.0ms | 42.0ms |
-| `/demo/redis`（3 命令） | 100 | **5823** | — | — | — |
+| `/`（纯框架） | 50 | **21769** | 1.44ms | 2.55ms | 4.85ms |
+| `/demo/db`（2 条 SQL） | 50 | **6790** | 4.37ms | 8.81ms | 14.88ms |
+| `/demo/redis`（3 命令） | 50 | **7459** | 4.24ms | 6.36ms | 7.78ms |
 
-Linux 纯框架吞吐高出 69%、Redis 高 104%（原生 epoll + 无 Windows 层中转），
-**"生产环境用 Linux"得到数据支撑**。压测后 `/__pool` 显示 db 池
-total_borrowed=14144、total_timeouts=0、active=0/idle=20——**零泄漏**。
+Linux 生产环境的基准待上线后另行实测（多进程模型与 macOS 一致，绝对数值取决于
+硬件与网络）。压测后 `/__pool` 显示 db/redis 池 total_timeouts=0、active=0——**零泄漏**。
 
 **连接池是硬容量边界**：`/demo/concurrent`（10 并行 SQL）在并发 10 时部分查询
 排队到 `waitTimeout`（demo 把超时吞成 error payload 返回 200）——业务峰值需要的
 并发连接数不要超过 `poolMaxActive`，超容量即排队/超时。
 
 压测还抓出两个真实 bug（均已修复 + 回归测试）：**子协程连接泄漏**（借出登记
-`spl_object_id` 索引 + `sweep()` 回收）与 **msys2 WeakMap 跨协程不可见**（改普通数组）。
+`spl_object_id` 索引 + `sweep()` 回收）与 **WeakMap 跨协程不可见**（改普通数组）。
 
 ---
 
@@ -663,7 +664,7 @@ total_borrowed=14144、total_timeouts=0、active=0/idle=20——**零泄漏**。
 
 ## 5.1 测试体系
 
-167 tests / 741 assertions（2 skipped），覆盖十一个目录：连接池并发（借还配对/超时/sweep）、
+172 tests / 747 assertions（2 skipped），覆盖十一个目录：连接池并发（借还配对/超时/sweep）、
 请求适配（头/cookie 签名/上传三种形状）、服务器集成（**真实 socket 交互，非 mock**：
 CSRF 全流程、表单三件套、静态文件、优雅停机、watch 热重载）、DB（事务含嵌套
 savepoint、并发 AR + 并发事务、Query::batch、协程外 detached 直连）、Redis
@@ -676,23 +677,24 @@ savepoint、并发 AR + 并发事务、Query::batch、协程外 detached 直连�
 
 | 运行时 | 测试 | 用途 |
 |---|---|---|
-| macOS + swoole-cli 6.2.0 / PHP 8.4 | 167/741 ✅（2 skipped） | 全套集成测试（真实 socket、优雅停机、watch、pid）+ PHPStan + cs |
-| macOS + swoole-cli（进程级 e2e / 基准） | e2e 13 checks / 8148-3330-3616 QPS | start/status/reload respawn/SIGTERM 全过；`/`、`/demo/db`、`/demo/redis`（50 并发 3s，0 错误、池零超时） |
-| WSL Ubuntu + swoole-cli 6.2.2 | 167/741 ✅ | 端到端（start/status/reload respawn/SIGTERM）+ 基准 |
-| WSL Ubuntu + pecl PHP 8.5 / swoole 6.2.4 | 167/741 ✅ | **CI 同源标准构建**（`http_parse_files` 修复的实战检验） |
+| macOS + swoole-cli 6.2.0 / PHP 8.4 | 172/747 ✅（2 skipped） | 全套集成测试（真实 socket、优雅停机、watch、pid）+ PHPStan + cs |
+| macOS + swoole-cli（进程级 e2e / 基准） | e2e 13 checks / 21769-6790-7459 QPS | start/status/reload respawn/SIGTERM 全过；`/`、`/demo/db`、`/demo/redis`（50 并发 3s，0 错误、池零超时） |
+| Linux + swoole-cli 6.2.2 | 167/741 ✅ | 端到端（start/status/reload respawn/SIGTERM）+ 基准 |
+| Linux + pecl PHP 8.5 / swoole 6.2.4 | 167/741 ✅ | **CI 同源标准构建**（`http_parse_files` 修复的实战检验） |
 | GitHub Actions | pecl 矩阵 PHP 8.2–8.5 | 云端矩阵 |
 
 独立外部 AI 评审四轮（见附录 B）：第一轮 6 缺陷、第二轮 2 项增量、第三轮
 （安全专项）7 处缺陷、第四轮（升级兼容性专项）8 处缺陷，均已修复并由新用例钉死。
 
-## 5.3 本地验证入口（Linux/WSL 与 macOS）
+## 5.3 本地验证入口（macOS 与 Linux）
 
 ```bash
 composer test    # PHPUnit（需要本地 MySQL/Redis；tests/console、tests/web 已含在套件）
 composer static  # PHPStan level 5
 composer cs      # php-cs-fixer（与官方 yii2 同规则）
-bash scripts/wsl-e2e.sh     # 进程级端到端：start/status/reload respawn/SIGTERM（macOS/Linux）
-bash scripts/wsl-bench.sh   # 基准：`/`、`/demo/db`、`/demo/redis`（macOS/Linux，可用 CONCURRENCY/DURATION 覆盖）
+bash scripts/e2e.sh     # 进程级端到端：start/status/reload respawn/SIGTERM（macOS/Linux）
+bash scripts/bench.sh   # 基准：`/`、`/demo/db`、`/demo/redis`（macOS/Linux，可用 CONCURRENCY/DURATION 覆盖）
+swoole-cli scripts/soak.php --port=9501 --path=/demo/db --duration=60 --pid=<pid>  # 长跑检漏：RSS/连接池漂移
 ```
 
 macOS 上用 swoole-cli 跑同一套用例（系统 PHP 一般没有 swoole 扩展）：
@@ -745,7 +747,7 @@ Log（`tests/log/`）、控制台（`tests/console/`）、上传/web（`tests/we
 再到 `CompatHttpFeaturesTest` 加一个方法（`withServer()` 内部即真实请求），
 同时在 `tests/data/app-compat.php` 里补齐该功能需要的组件配置。
 
-> raw 路由的性能定位（同机、ab -k c=50、单进程）：raw `/ping` 5.5–6.2 万 QPS，
+> raw 路由的性能定位（同机、ab -k c=50、单 worker）：raw `/ping` 5.5–6.2 万 QPS，
 > 完整 Yii 路由 1.4–1.5 万，裸 Swoole 5.8–6.3 万。也就是说 raw 路由基本贴着
 > Swoole 上限跑，适合健康检查/指标/极简无状态接口；需要鉴权与框架能力的接口仍走 Yii。
 
@@ -845,75 +847,66 @@ $pool = new ConnectionPool(
 **主动取舍（非缺陷）**：
 
 - 需要 `urlManager.enablePrettyUrl = true`（`?r=` 路由依赖 `$_GET`，协程不安全）
-- 单进程模型适合 API 服务；CPU 密集任务应交给独立进程
+- 多进程模型适合 API 服务；CPU 密集任务应交给独立进程
 - Queue 未兼容 `yii\queue\Queue` 接口（避免依赖；列为后续增强）
 - MySQL 主从/读写分离未透传（池化模式下需真实主从环境验证，不假装支持）
 - 协程 HttpClient 组件未内置（Swoole 原生 `Coroutine\Http\Client` 可直接用）
 
 ---
 
-# 第七部分 · 踩坑实录（29 条）
+# 第七部分 · 踩坑实录（27 条）
 
 > 每条都是可复现的实证记录，后续维护者遇到同类现象可直接对号入座。
 
 1. **Yii2 默认 `Session` 完全不适用于协程环境** —— 原生 `session_start()` 输出
    `Set-Cookie` 头且依赖 `$_SESSION` 全进程共享。必须用 `CoroutineSession`（Redis 存储）。
-2. **`Coroutine\Http\Server` 不支持 `daemonize`** —— 守护化用 pid 文件 + 停服标志文件
+2. **`Http\Server` 不支持 `daemonize`** —— 守护化用 pid 文件 + 停服标志文件
    + `swoole/stop` 实现跨进程停机。
-3. **协程 `Http\Server` 完全忽略 `enable_static_handler`** —— 静态文件必须 PHP 层
+3. **`Http\Server` 完全忽略 `enable_static_handler`** —— 静态文件必须 PHP 层
    （`StaticFileServer`）或 nginx。
-4. **子协程内禁止创建 `Swoole\Coroutine\Http\Server`** —— 端口绑定竞态；服务器
-   必须独占协程（`HttpServer::start()` 内部处理）。
-5. **Windows msys2 构建的限制** —— exec/popen 受限（respawn 降级提示）、Swoole
-   `Timer` 不可用；**该平台已从目标平台移除**（生产 Linux / 开发 macOS / Windows 仅预构建）。
-6. **`gracefulTimeout` 内在途请求排空是"有界等待"** —— 超时后强制 shutdown，
+4. **禁止在协程内创建/启动 `Swoole\Http\Server`** —— 端口绑定竞态；服务器
+   必须在主线程独占运行（`HttpServer::start()` 内部处理）。
+5. **`gracefulTimeout` 内在途请求排空是"有界等待"** —— 超时后强制 shutdown，
    慢请求会被断连；`stopwaitsecs` 要大于 `gracefulTimeout`。
-7. **每请求状态重建的组件清单**（request/response/session/user）——漏一个就是
+6. **每请求状态重建的组件清单**（request/response/session/user）——漏一个就是
    跨请求污染；新增请求级组件时同步 `RequestStateManager::REQUEST_SCOPED_COMPONENTS`。
-8. **池化组件的 `release()` 只能归还当前协程粘性连接** —— 子协程借用由 `sweep()` 兜底。
-9. **`enableCoroutinePooling = false` 是排障利器** —— 池化异常时先关池化定位是池的问题还是业务问题。
-10. **Yii2 `ErrorHandler` 会把 warning 升级成 ErrorException** —— 常驻进程里"无关紧要"
-    的 notice/warning 都会在下个请求爆发；第三方库的噪音要显式 try/catch 或关闭该库的警告路径。
-11. **日志缓冲必须加互斥锁** —— 每请求 flush 并发读改写 `messages`（Channel 互斥锁）；
+7. **池化组件的 `release()` 只能归还当前协程粘性连接** —— 子协程借用由 `sweep()` 兜底。
+8. **`enableCoroutinePooling = false` 是排障利器** —— 池化异常时先关池化定位是池的问题还是业务问题。
+9. **Yii2 `ErrorHandler` 会把 warning 升级成 ErrorException** —— 常驻进程里"无关紧要"
+   的 notice/warning 都会在下个请求爆发；第三方库的噪音要显式 try/catch 或关闭该库的警告路径。
+10. **日志缓冲必须加互斥锁** —— 每请求 flush 并发读改写 `messages`（Channel 互斥锁）；
     **锁的懒初始化必须留在协程内**（协程外 push Channel 令牌静默失败 → 死锁，实测）。
-12. **`$_FILES` 要按请求填充并 reset `UploadedFile` 静态缓存** —— 官方 `UploadedFile::loadFiles()`
+11. **`$_FILES` 要按请求填充并 reset `UploadedFile` 静态缓存** —— 官方 `UploadedFile::loadFiles()`
     直读 `$_FILES` 超全局；静态缓存跨请求泄漏会串文件。
-13. **Cookie 必须走签名验证通道** —— "官方静态 API 依赖进程态"的模式；协程组件覆写时
+12. **Cookie 必须走签名验证通道** —— "官方静态 API 依赖进程态"的模式；协程组件覆写时
     逐条对照官方实现（`loadCookies` 的 validateData 不可省）。
-14. **Swoole `cookie()` 自动 urlencode，`rawcookie()` 不编** —— 与 PHP `setcookie()` 对齐；
+13. **Swoole `cookie()` 自动 urlencode，`rawcookie()` 不编** —— 与 PHP `setcookie()` 对齐；
     手动再编码 = 双重编码（签名串被破坏）。
-15. **phpredis `SET` 选项必须关联键** —— `['NX', 'EX', 60]` 的 EX 被静默忽略；
+14. **phpredis `SET` 选项必须关联键** —— `['NX', 'EX', 60]` 的 EX 被静默忽略；
     必须 `['NX', 'EX' => 60]`。
-16. **phpredis `PING` 返回 `bool(true)`** 而非字符串——判断兼容两种风格。
-17. **`Coroutine::sleep` 协程外抛 `Swoole\Error`** —— console 主线程用 `usleep` 双路 helper。
-18. **msys2 构建 WeakMap 跨协程不可见** —— 跨协程共享状态用普通数组。
-19. **`RecursiveDirectoryIterator` 并发扫描要全容错** —— 与 dev 工具写文件竞态，
+15. **phpredis `PING` 返回 `bool(true)`** 而非字符串——判断兼容两种风格。
+16. **`Coroutine::sleep` 协程外抛 `Swoole\Error`** —— console 主线程用 `usleep` 双路 helper。
+17. **WeakMap 跨协程写入不可见** —— 跨协程共享状态用普通数组。
+18. **`RecursiveDirectoryIterator` 并发扫描要全容错** —— 与 dev 工具写文件竞态，
     stat warning 会被 Yii error handler 升级为请求内 fatal（HeadersAlreadySent 连锁）。
-20. **phpstan 对无副作用 getter 的轮询循环报恒真条件** —— `@phpstan-impure` 是官方解。
-21. **phpunit.xml 的 testsuite 是手工目录列表** —— 新增测试目录要同步加进去，
+19. **phpstan 对无副作用 getter 的轮询循环报恒真条件** —— `@phpstan-impure` 是官方解。
+20. **phpunit.xml 的 testsuite 是手工目录列表** —— 新增测试目录要同步加进去，
     否则测试"存在但从不运行"（本次 ResponseAndUrlTest 漏网实例）。
-22. **PowerShell 内联调用 WSL 命令是转义地狱** —— `$(...)`/`$var` 被展开、`curl` 是
-    `Invoke-WebRequest` 别名；一律脚本文件 + 输出落盘再读。
-23. **WSL mirrored 网络模式** —— Windows 侧服务可被 WSL 以 `127.0.0.1` 直连
-    （`.wslconfig` 设 `networkingMode=mirrored`）。
-24. **nohup 后台进程随 wsl.exe 会话退出被杀** —— 长任务前台执行或用宿主侧调度。
-25. **pid 文件默认路径随配置变化** —— `sys_get_temp_dir()/yii2s-swoole-{euid}/{host}-{port}.pid`（按用户隔离的子目录，避免 /tmp 里被他人预创建/软链）；
+21. **pid 文件默认路径随配置变化** —— `sys_get_temp_dir()/yii2s-swoole-{euid}/{host}-{port}.pid`（按用户隔离的子目录，避免 /tmp 里被他人预创建/软链）；
     外部脚本不要硬编码 example 的旧路径（曾致 e2e SIGTERM 步骤必失败）。
-26. **外部评审的修复要"逐项 git 考古"甄别** —— 第二轮评审把第一轮已修复项当新发现
+22. **外部评审的修复要"逐项 git 考古"甄别** —— 第二轮评审把第一轮已修复项当新发现
     重报（工作线基于旧快照）；但增量部分仍抓到真问题（脚本与配置漂移、.gitattributes）。
-27. **自研 error handler 会覆盖用户 handler，fatal 细节被生产渲染吞掉** —— 诊断时用
+23. **自研 error handler 会覆盖用户 handler，fatal 细节被生产渲染吞掉** —— 诊断时用
     `register_shutdown_function` + `error_get_last()` 拿真实错误（本包排查实例）。
-28. **测试访问组件私有属性会以"协程内 uncaught 异常"形式挂死整个套件** ——
+24. **测试访问组件私有属性会以"协程内 uncaught 异常"形式挂死整个套件** ——
     `$server->isRunning` vs `isRunning()`——症状是 Coroutine\run 不退出，先查属性访问。
-29. **Swoole 构建间的默认值差异是隐性炸弹**（`http_parse_files` 一例）——
+25. **Swoole 构建间的默认值差异是隐性炸弹**（`http_parse_files` 一例）——
     依赖外部默认值的行为一律显式声明。
-30. **path repo 的 symlink 会被依赖操作悄悄弄丢** —— `composer update --with-all-dependencies`
+26. **path repo 的 symlink 会被依赖操作悄悄弄丢** —— `composer update --with-all-dependencies`
     重建 vendor 后 path 包目录可能变空，且空目录让 composer 误判"已安装"而跳过重装；
     `rm -rf vendor/<vendor> && composer install` 重建。开发期用 `--watch` 每日确认包更新生效。
-31. **`pkill -f` 会匹配自己的命令行** —— 模式里用 `[s]` 正则技巧（`pkill -f "[s]woole-cli"`）
-    防自杀；验证脚本**必须**以停服结尾（或 setsid 脱离），否则常驻服务器让 WSL 会话永不返回。
-32. **WSL 的 /tmp 随实例重启清空** —— 日志/pid 落 `$HOME`；PowerShell 写文件默认带 UTF-8 BOM
-    且多轮写入会交错损坏配置——重要配置用单一来源重写并 `php -l` + 键断言验证。
+27. **`pkill -f` 会匹配自己的命令行** —— 模式里用 `[s]` 正则技巧（`pkill -f "[s]woole-cli"`）
+    防自杀；验证脚本**必须**以停服结尾（或 setsid 脱离），否则常驻服务器会让脚本挂起不返回。
 
 ---
 
@@ -932,11 +925,11 @@ $pool = new ConnectionPool(
 | C5 | Basic Auth 头解析正确（密码含冒号/空密码/scheme 大小写） | `tests/runtime/HttpBasicAuthTest.php` |
 | C6 | Redis MULTI/DISCARD/PIPELINE 天然工作 | `tests/redis/RedisMultiTest.php` |
 | C7 | 优雅停机等待在途请求排空（有界） | `tests/server/HttpServerGracefulStopTest.php` |
-| C8 | reload 在 Linux 上真实 respawn + watch 热重载 | `scripts/wsl-e2e.sh`（pid 变化、端口重绑、服务恢复） |
+| C8 | reload 真实 respawn + watch 热重载 | `scripts/e2e.sh`（pid 变化、端口重绑、服务恢复） |
 | C9 | 数据库事务在协程下正常（含嵌套 savepoint） | `tests/db/`；`curl /demo/transaction` |
 | C10 | 队列：延迟投递、失败重试、超限死信 | `tests/queue/CoroutineRedisQueueTest.php` |
 | C11 | 队列空时 run(N) 立即返回；`queue/serve` 空队列不崩 | `tests/queue/`（含协程外场景） |
-| C12 | Linux 基准 13706 QPS，池零泄漏 | `scripts/wsl-bench.sh` + `/__pool`（total_timeouts=0, active=0） |
+| C12 | 压测基准 21769 QPS，池零泄漏 | `scripts/bench.sh` + `/__pool`（total_timeouts=0, active=0） |
 | C13 | Cookie 签名验证（入站验证 + 出站签名） | `tests/runtime/CoroutineRequestTest.php`（篡改丢弃）+ `HttpServerCsrfTest`（往返） |
 | C14 | 上传三种形状归一化 + `$_FILES` 官方 API 通路 | `tests/server/HttpServerFormTest.php`（sha1 字节级验证） |
 | C15 | 升级后 Yii2 功能点端到端可用（路由/请求/响应格式/重定向/Cookie/CSRF/会话/登录/Flash/上传/下载/错误/常驻服务） | `tests/compat/CompatHttpFeaturesTest.php`（真实 socket，见 5.4 矩阵） |
@@ -968,7 +961,7 @@ $pool = new ConnectionPool(
 ### 第二轮——甄别结论 + 2 项真增量
 
 - 6 个"源码缺陷"经 git 考古确认**全部为第一轮已修复项的复述**（无需动作）；
-- **真增量（已落地）**：`wsl-e2e.sh` pid 路径漂移（example 配置演进后脚本未同步，
+- **真增量（已落地）**：`e2e.sh` pid 路径漂移（example 配置演进后脚本未同步，
   SIGTERM 步骤必失败——含空值守卫修复）；`.gitattributes` 强制 `*.sh` LF
   （根治 CRLF 污染）。
 - 第二轮在当前 HEAD 的独立验证与本方结果吻合：87→98 tests 全绿、

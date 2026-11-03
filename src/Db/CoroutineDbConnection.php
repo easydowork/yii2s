@@ -144,6 +144,24 @@ class CoroutineDbConnection extends Connection implements HasConnectionPool
     }
 
     /**
+     * Discards the coroutine-bound connection without returning it to the
+     * pool, because it is known to be broken (e.g. the server went away).
+     *
+     * Called by [[CoroutineCommand]] when a statement fails with a
+     * connection-loss error. Safe to call multiple times: once the binding is
+     * removed, subsequent calls are no-ops.
+     */
+    public function discardCurrent(): void
+    {
+        $key = self::CONTEXT_KEY_PREFIX . spl_object_id($this);
+        $connection = CoroutineContext::get($key);
+        if ($connection instanceof Connection) {
+            CoroutineContext::remove($key);
+            $this->getPool()->discard($connection);
+        }
+    }
+
+    /**
      * Closes the pool and all its connections.
      */
     public function closePool(): void
@@ -193,7 +211,13 @@ class CoroutineDbConnection extends Connection implements HasConnectionPool
         if (!$this->enableCoroutinePooling) {
             return parent::createCommand($sql, $params);
         }
-        return $this->borrow()->createCommand($sql, $params);
+
+        $command = $this->borrow()->createCommand($sql, $params);
+        if ($command instanceof CoroutineCommand) {
+            $command->setOwner($this);
+        }
+
+        return $command;
     }
 
     public function beginTransaction($isolationLevel = null)
@@ -296,7 +320,12 @@ class CoroutineDbConnection extends Connection implements HasConnectionPool
             'queryCacheDuration' => $this->queryCacheDuration,
             'enableLogging' => $this->enableLogging,
             'enableProfiling' => $this->enableProfiling,
-            'commandClass' => $this->commandClass,
+            // Upgrade the default command to the self-healing variant so a
+            // dead connection is discarded instead of reused. A custom
+            // commandClass is honoured as-is (its author owns the behavior).
+            'commandClass' => ($this->commandClass === 'yii\db\Command' || $this->commandClass === \yii\db\Command::class)
+                ? CoroutineCommand::class
+                : $this->commandClass,
             'commandMap' => $this->commandMap,
             'shuffleMasters' => false,
         ]);

@@ -10,16 +10,16 @@ declare(strict_types=1);
 
 namespace Yii2S\Swoole\Server;
 
-use Swoole\Coroutine\Http\Server as SwooleCoroutineHttpServer;
 use Swoole\Http\Request;
 use Swoole\Http\Response;
+use Swoole\Http\Server;
 
 /**
  * Dispatches a Swoole HTTP request through the Yii2 application.
  */
 interface RequestDispatcherInterface
 {
-    public function dispatch(Request $request, Response $response, SwooleCoroutineHttpServer $server): void;
+    public function dispatch(Request $request, Response $response, Server $server): void;
 
     /**
      * Warms up resources (e.g. connection pools) before the server starts

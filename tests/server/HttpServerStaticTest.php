@@ -10,18 +10,13 @@ declare(strict_types=1);
 
 namespace yii2stest\server;
 
-use Swoole\Coroutine;
-use Swoole\Coroutine\Http\Client;
-use Yii;
-use Yii2S\Swoole\Server\HttpServer;
-use Yii2S\Swoole\Server\RequestDispatcher;
-use yii2stest\TestCase;
+use yii2stest\ServerTestCase;
 
 /**
  * @group server
  * @group integration
  */
-class HttpServerStaticTest extends TestCase
+class HttpServerStaticTest extends ServerTestCase
 {
     private string $docRoot;
 
@@ -44,50 +39,26 @@ class HttpServerStaticTest extends TestCase
     public function testStaticFilesAreServedAndMissingPathsFallThrough(): void
     {
         $this->runInCoroutine(function (): void {
-            $server = Yii::createObject([
-                'class' => HttpServer::class,
-                'host' => '127.0.0.1',
-                'port' => 23490,
-                'documentRoot' => $this->docRoot,
-                'enableSignalHandling' => false,
-                'dispatcher' => new RequestDispatcher(__DIR__ . '/../data/app.php'),
+            $this->startServer(__DIR__ . '/../data/app.php', [
+                'server' => ['documentRoot' => $this->docRoot],
             ]);
-
-            // The dispatcher must have picked up the document root.
-            $dispatcher = $server->dispatcher;
-            $this->assertInstanceOf(RequestDispatcher::class, $dispatcher);
-            $this->assertSame($this->docRoot, $dispatcher->staticRoot);
-
-            Coroutine::create(function () use ($server): void {
-                try {
-                    $server->start();
-                } catch (\Throwable) {
-                }
-            });
-
             try {
-                $this->waitForServer(23490);
-
-                $css = $this->request(23490, '/css/app.css');
+                $css = $this->get('/css/app.css');
                 $this->assertSame(200, $css['status']);
                 $this->assertSame('body { color: red; }', $css['body']);
-                $this->assertSame('text/css; charset=utf-8', $css['contentType']);
+                $this->assertSame('text/css; charset=utf-8', (string) ($css['headers']['content-type'] ?? ''));
 
                 // Missing paths fall through to the Yii2 router (404).
-                $missing = $this->request(23490, '/site/missing');
+                $missing = $this->get('/site/missing');
                 $this->assertSame(404, $missing['status']);
 
                 // Yii routes keep working alongside static files.
-                $index = $this->request(23490, '/');
+                $index = $this->get('/');
                 $this->assertSame(200, $index['status']);
-                $indexBody = json_decode($index['body'], true);
-                $this->assertSame('yii2stest', $indexBody['app'] ?? null);
+                $this->assertSame('yii2stest', $index['json']['app'] ?? null);
             } finally {
-                $server->stop();
-                $this->waitFor(fn (): bool => !$server->isRunning());
+                $this->stopServer();
             }
-
-            $this->assertFalse($server->isRunning());
         });
     }
 
@@ -98,90 +69,27 @@ class HttpServerStaticTest extends TestCase
 
         try {
             $this->runInCoroutine(function (): void {
-                $port = random_int(26000, 30000);
-                $server = Yii::createObject([
-                    'class' => HttpServer::class,
-                    'host' => '127.0.0.1',
-                    'port' => $port,
-                    'documentRoot' => $this->docRoot,
-                    'enableSignalHandling' => false,
-                    'dispatcher' => new RequestDispatcher(__DIR__ . '/../data/app.php'),
+                $this->startServer(__DIR__ . '/../data/app.php', [
+                    'server' => ['documentRoot' => $this->docRoot],
                 ]);
-
-                Coroutine::create(function () use ($server): void {
-                    try {
-                        $server->start();
-                    } catch (\Throwable) {
-                    }
-                });
-
                 try {
-                    $this->waitForServer($port);
-
-                    $php = $this->request($port, '/secret.php');
+                    $php = $this->get('/secret.php');
                     $this->assertSame(404, $php['status'], 'PHP source must never be served as a static file');
 
-                    $env = $this->request($port, '/.env');
+                    $env = $this->get('/.env');
                     $this->assertSame(404, $env['status'], 'hidden files must never be served as a static file');
 
                     // An encoded null byte must be rejected *after* decoding,
-                    // before it reaches realpath() (which throws a ValueError
-                    // on null bytes - an uncaught exception in the request
-                    // coroutine takes the worker down).
-                    $nullByte = $this->request($port, '/css/app.css%00.png');
+                    // before it reaches realpath().
+                    $nullByte = $this->get('/css/app.css%00.png');
                     $this->assertSame(404, $nullByte['status'], 'encoded null bytes must not reach the filesystem');
                 } finally {
-                    $server->stop();
-                    $this->waitFor(fn (): bool => !$server->isRunning());
+                    $this->stopServer();
                 }
             });
         } finally {
             @unlink($this->docRoot . '/secret.php');
             @unlink($this->docRoot . '/.env');
         }
-    }
-
-    private function request(int $port, string $path): array
-    {
-        $client = new Client('127.0.0.1', $port);
-        $this->assertTrue($client->get($path), "request to {$path} must succeed");
-
-        $result = [
-            'status' => $client->statusCode,
-            'body' => (string) $client->body,
-            'contentType' => (string) ($client->headers['content-type'] ?? ''),
-        ];
-        $client->close();
-
-        return $result;
-    }
-
-    private function waitForServer(int $port, int $timeoutSeconds = 15): void
-    {
-        $deadline = microtime(true) + $timeoutSeconds;
-        while (microtime(true) < $deadline) {
-            $client = new Client('127.0.0.1', $port);
-            $up = $client->get('/');
-            $client->close();
-            if ($up) {
-                return;
-            }
-            Coroutine::sleep(0.2);
-        }
-
-        $this->fail("Integration server did not come up on port {$port}.");
-    }
-
-    private function waitFor(callable $condition, int $timeoutSeconds = 10): void
-    {
-        $deadline = microtime(true) + $timeoutSeconds;
-        while (microtime(true) < $deadline) {
-            if ($condition()) {
-                return;
-            }
-            Coroutine::sleep(0.05);
-        }
-
-        $this->fail('Condition was not met within the timeout.');
     }
 }

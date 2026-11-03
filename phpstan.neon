@@ -20,8 +20,3 @@ parameters:
         -
             message: '#will always evaluate to false#'
             path: tests/server/HttpServerGracefulStopTest.php
-        # The server state changes inside a separate coroutine, which phpstan
-        # cannot model: it assumes isRunning() never flips back to false.
-        -
-            message: '#Negated boolean expression is always true\.#'
-            path: tests/server/HttpServerPidFileTest.php

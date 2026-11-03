@@ -62,9 +62,8 @@ class ConnectionPool
      * explicitly).
      *
      * Note: a plain array is used deliberately - WeakMap writes performed in
-     * child coroutines are not visible in other coroutines on the Windows
-     * (msys2) swoole-cli build, which both breaks the tracking and crashes
-     * the process.
+     * child coroutines may not be visible to other coroutines, which would
+     * break the tracking.
      *
      * @var array<int, array{0: object, 1: int}>
      */

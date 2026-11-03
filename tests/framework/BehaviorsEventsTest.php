@@ -15,9 +15,8 @@ use yii\db\ActiveRecord;
 use yii2stest\TestCase;
 
 /**
- * Behaviors/events with a directly managed connection (same pattern as the
- * successful WSL probe): TimestampBehavior, SluggableBehavior,
- * BlameableBehavior, dynamic attach/detach, AR event family.
+ * Behaviors/events with a directly managed connection: TimestampBehavior,
+ * SluggableBehavior, BlameableBehavior, dynamic attach/detach, AR event family.
  *
  * @group db
  * @group mysql

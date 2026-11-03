@@ -12,97 +12,54 @@ namespace yii2stest\server;
 
 use Swoole\Coroutine;
 use Swoole\Coroutine\Http\Client;
-use Yii;
-use Yii2S\Swoole\Runtime\RequestStateManager;
-use Yii2S\Swoole\Server\HttpServer;
-use Yii2S\Swoole\Server\RequestDispatcher;
-use yii2stest\TestCase;
+use yii2stest\ServerTestCase;
 
 /**
+ * Graceful reload: SIGUSR1 (`swoole/reload`, the watch watchdog) must drain
+ * in-flight requests before restarting the workers, so a slow request is
+ * delivered instead of being cut off mid-flight.
+ *
  * @group server
  * @group integration
  */
-class HttpServerGracefulStopTest extends TestCase
+class HttpServerGracefulStopTest extends ServerTestCase
 {
-    public function testStopWaitsForInFlightRequests(): void
+    public function testReloadWaitsForInFlightRequests(): void
     {
         $this->runInCoroutine(function (): void {
-            $port = random_int(26000, 30000);
-            $server = Yii::createObject([
-                'class' => HttpServer::class,
-                'host' => '127.0.0.1',
-                'port' => $port,
-                'enableSignalHandling' => false,
-                'gracefulTimeout' => 5.0,
-                'dispatcher' => new RequestDispatcher(__DIR__ . '/../data/app-slow.php'),
+            $this->startServer(__DIR__ . '/../data/app-slow.php', [
+                'server' => ['gracefulTimeout' => 5.0],
             ]);
-
-            Coroutine::create(function () use ($server): void {
-                try {
-                    $server->start();
-                } catch (\Throwable) {
-                }
-            });
-
             try {
-                $this->waitForServer($port);
-
-                // Start a slow request (~1s) and call stop() while it is in
-                // flight: the response must still be delivered and the
-                // counter must drain before shutdown.
+                // Start a slow request (~1s) and reload while it is in flight.
                 $slowDone = false;
-                Coroutine::create(function () use ($port, &$slowDone): void {
-                    $client = new Client('127.0.0.1', $port);
+                $slowStatus = 0;
+                Coroutine::create(function () use (&$slowDone, &$slowStatus): void {
+                    $client = new Client('127.0.0.1', $this->port);
                     $ok = $client->get('/slow/index');
+                    $slowStatus = (int) $client->statusCode;
                     $client->close();
-                    $slowDone = $ok && $client->statusCode === 200;
+                    $slowDone = $ok;
                 });
 
-                Coroutine::sleep(0.3); // let the slow request start
+                Coroutine::sleep(0.3);
                 $this->assertFalse($slowDone, 'slow request should still be running');
-                $this->assertGreaterThan(0, RequestStateManager::getActiveRequests());
 
-                $server->stop();
+                $this->reloadServer(); // SIGUSR1: graceful worker reload
 
-                $this->assertTrue($slowDone, 'in-flight request must complete before shutdown');
-                $this->assertSame(0, RequestStateManager::getActiveRequests());
+                // A regular closure captures $slowDone by reference (arrow
+                // functions capture by value and would never see the update).
+                $this->waitFor(function () use (&$slowDone): bool {
+                    return $slowDone;
+                }, 5.0);
+                $this->assertTrue($slowDone, 'in-flight request must complete during graceful reload');
+                $this->assertSame(200, $slowStatus);
+
+                // The server stays up after the reload.
+                $this->assertSame(404, $this->get('/no-such-route')['status']);
             } finally {
-                if ($server->isRunning()) {
-                    $server->stop();
-                }
-                $this->waitFor(fn (): bool => !$server->isRunning());
+                $this->stopServer();
             }
-
-            $this->assertFalse($server->isRunning());
         });
-    }
-
-    private function waitForServer(int $port, int $timeoutSeconds = 15): void
-    {
-        $deadline = microtime(true) + $timeoutSeconds;
-        while (microtime(true) < $deadline) {
-            $client = new Client('127.0.0.1', $port);
-            $up = $client->get('/');
-            $client->close();
-            if ($up) {
-                return;
-            }
-            Coroutine::sleep(0.2);
-        }
-
-        $this->fail("Integration server did not come up on port {$port}.");
-    }
-
-    private function waitFor(callable $condition, int $timeoutSeconds = 10): void
-    {
-        $deadline = microtime(true) + $timeoutSeconds;
-        while (microtime(true) < $deadline) {
-            if ($condition()) {
-                return;
-            }
-            Coroutine::sleep(0.05);
-        }
-
-        $this->fail('Condition was not met within the timeout.');
     }
 }

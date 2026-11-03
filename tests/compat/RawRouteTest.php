@@ -10,8 +10,6 @@ declare(strict_types=1);
 
 namespace yii2stest\compat;
 
-use Yii2S\Swoole\Server\RequestDispatcher;
-
 /**
  * Raw routes answer requests without creating the Yii request/response, and
  * must coexist with the normal Yii pipeline (method mismatch falls through,
@@ -28,15 +26,13 @@ class RawRouteTest extends CompatTestCase
     public function testRawRoutes(): void
     {
         $this->runInCoroutine(function (): void {
-            $dispatcher = new RequestDispatcher(__DIR__ . '/../data/app-raw.php');
-            $dispatcher
-                ->addRawRoute('GET', '/ping', static fn (): string => 'pong')
-                ->addRawRoute('GET', '/health', static fn (): array => ['ok' => true])
-                ->addRawRoute('GET', '/boom', static function (): string {
-                    throw new \RuntimeException('raw-route-boom');
-                });
-
-            $this->startServerWithDispatcher($dispatcher);
+            $this->startServer('app-raw.php', [
+                'rawRoutes' => [
+                    ['method' => 'GET', 'path' => '/ping', 'type' => 'string', 'value' => 'pong'],
+                    ['method' => 'GET', 'path' => '/health', 'type' => 'array', 'value' => ['ok' => true]],
+                    ['method' => 'GET', 'path' => '/boom', 'type' => 'throw', 'message' => 'raw-route-boom'],
+                ],
+            ]);
             try {
                 $res = $this->http('GET', '/ping');
                 $this->assertSame(200, $res['status']);

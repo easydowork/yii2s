@@ -94,6 +94,7 @@ return [
             'documentRoot' => '@app/public',
             'dispatcher' => (new \Yii2S\Swoole\Server\RequestDispatcher(__DIR__ . '/web.php', [
                 'enablePoolMetricsEndpoint' => true,
+                'enableMetricsEndpoint' => true,
             ]))
                 // Raw route: answered without creating the Yii request/response
                 // objects - use it for health checks / tiny stateless APIs.
