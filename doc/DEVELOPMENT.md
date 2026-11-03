@@ -141,7 +141,7 @@ php yii swoole/start [--host=] [--port=] [--watch]  # 启动（阻塞），写 p
 php yii swoole/status                               # 查看运行状态
 php yii swoole/stop                                 # 优雅停机（在途请求排空后退出）
 php yii swoole/reload                               # 停机 + 尽力重新拉起（生产建议交给 supervisor）
-php yii swoole/check                                # 配置体检（db/redis 探活、关键配置校验）
+php yii swoole/check                                # 配置体检（Application 隔离、cookie key、prettyUrl、db/redis 探活）
 php yii queue/serve [--limit=N]                     # 队列消费 worker（无限轮询）
 ```
 
@@ -208,9 +208,11 @@ php yii queue/serve [--limit=N]                     # 队列消费 worker（无�
 
 ### 放心用（已验证原生可用）
 
-- `yii\web\User`（登录/identity 持久化）、`HttpBasicAuth`、CSRF、`UploadedFile`、
-  事务（含嵌套 savepoint）、Redis MULTI/PIPELINE、`Query::batch()`、
-  迁移与 AR 全套 —— 均有测试钉死（见第五部分）。
+- `yii\web\User`（登录/identity 持久化，含 session id 重生成）、`HttpBasicAuth`、CSRF、
+  `UploadedFile`（读）与 `Runtime\CoroutineUploadedFile`（读+落盘）、`Session` flash、
+  `Response::sendFile()`（含 Range 206）、事务（含嵌套 savepoint）、
+  Redis MULTI/PIPELINE、`Query::batch()`、迁移与 AR 全套 —— 均有测试钉死
+  （见第五部分，端到端清单见 5.4）。
 
 ---
 
@@ -235,6 +237,149 @@ swoole-cli example/yii swoole/start        （控制台入口，创建 console A
                              └─ finally: RequestStateManager::cleanup()
 ```
 
+### 3.1.1 全景流程图（接入 → 启动 → 请求 → 停机）
+
+#### ① 接入：只改一处
+
+```php
+// config/web.php
+return [
+    'bootstrap' => [
+        ['class' => \Yii2S\Swoole\Bootstrap::class],   // ← 唯一必须的改动
+    ],
+    'components' => [
+        // request/response/db/redis 保持 stock 类，Bootstrap 自动替换
+        'session' => ['class' => CoroutineSession::class],   // 这三类需显式配置
+        'cache'   => ['class' => CoroutineRedisCache::class],
+        'queue'   => ['class' => CoroutineRedisQueue::class, 'handler' => ...],
+    ],
+];
+```
+
+```
+composer require easydowork/yii2s
+        │
+        ▼
+config/web.php 加一行 bootstrap ──► php yii swoole/check ──► php yii swoole/start
+                                        （配置体检）              （常驻服务）
+```
+
+#### ② 启动（CLI 进程）
+
+```
+php yii swoole/start
+  │
+  ├─ 创建 console Application（读 config/console.php）
+  │
+  ├─ SwooleController::actionStart()
+  │    ├─ 读 web 配置里的 swooleHttpServer 组件
+  │    └─ HttpServer::start()
+  │         ├─ Coroutine::set(['hook_flags' => SWOOLE_HOOK_ALL])   I/O 自动协程化
+  │         ├─ 写 pid 文件（/tmp/yii2s-swoole-<uid>/<host>-<port>.pid）
+  │         └─ Coroutine\run()
+  │              └─ Swoole\Coroutine\Http\Server->handle('/', dispatcher)->start()
+  │                   │
+  │                   └─ 第一条请求时才创建常驻 Web Application：
+  │                        new CoroutineApplication(config/web.php)
+  │                          ├─ Bootstrap::bootstrap()
+  │                          │    ├─ request  → CoroutineRequest
+  │                          │    ├─ response → CoroutineResponse
+  │                          │    ├─ db       → CoroutineDbConnection
+  │                          │    ├─ redis    → CoroutineRedisConnection
+  │                          │    └─ 校正 @webroot / @web
+  │                          └─ 之后所有请求复用这个 Application
+```
+
+#### ③ 单次请求（每个连接一个协程）
+
+```
+┌─ Swoole 收到 HTTP 请求 ──────────────────────────────────────────────┐
+│                                                                     │
+│  ① documentRoot 命中静态文件？                                       │
+│        └─是─► StaticFileServer（扩展名黑名单 + realpath 前缀校验）──► 响应
+│  ② 路径 = /__pool 且已开启？                                         │
+│        └─是─► PoolMetricsCollector ────────────────────────────────► JSON
+│                                                                     │
+│  ③ RequestDispatcher::dispatch()                                    │
+│        ├─ CoroutineApplication::get()                               │
+│        │     request / response / session / user                    │
+│        │     ← 从「当前协程上下文」取，没有则按配置定义新建            │
+│        │       （并发请求互不可见）                                   │
+│        ├─ CoroutineRequest::setSwooleRequest()                      │
+│        │     query/body/headers/cookies/files 全部指向本次请求         │
+│        ├─ Yii::$app->handleRequest()                                │
+│        │     ├─ UrlManager 解析路由 → Controller/Action              │
+│        │     ├─ 业务代码                                            │
+│        │     │     ├─ db    → borrow() 池连接（协程粘性，事务同连接）  │
+│        │     │     ├─ redis → borrow() 池连接（MULTI/PIPELINE）       │
+│        │     │     ├─ cache → Redis 池连接                           │
+│        │     │     ├─ session/user → CoroutineSession（Redis）       │
+│        │     │     └─ queue → Redis ZSET（push）                     │
+│        │     └─ 返回 Response（HTML / JSON / 文件流）                 │
+│        ├─ CoroutineResponse::finalize()   formatter 管线，不写 stdout │
+│        └─ SwooleResponseSender::send()    status/headers/cookies/body │
+│                                           （stream 走分块 + Range）    │
+│                                                                     │
+│  ④ 异常？                                                           │
+│        └─► renderExceptionResponse()                                │
+│              └─ errorHandler.errorAction（如 site/error）             │
+│                   ├─ 普通请求 → HTML 错误页                          │
+│                   └─ AJAX     → JSON                                │
+│                                                                     │
+│  ⑤ finally: RequestStateManager::cleanup()                          │
+│        ├─ db/redis 组件 release() → 连接归还池                       │
+│        ├─ 池 sweep() → 回收已结束子协程借走的连接                     │
+│        ├─ 重置共享组件缓存（兜底）                                    │
+│        └─ Logger::flush(true) → CoroutineFileTarget 批量落盘         │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+#### ④ 停机
+
+```
+supervisor: SIGTERM           控制台: php yii swoole/stop
+        │                              │
+        └──────────────┬───────────────┘
+                       ▼
+     信号回调只置标志（不在回调里做阻塞操作）
+                       ▼
+     专用协程：等待在途请求排空（gracefulTimeout，默认 10s）
+                       ▼
+     server->shutdown() → 删除 pid / stop 标志文件
+```
+
+#### ⑤ 组件替换对照
+
+| 组件 | stock 类（配置里照旧写） | 运行时实际类 | 何时替换 |
+|---|---|---|---|
+| request | `yii\web\Request` | `Runtime\CoroutineRequest` | Bootstrap 自动 |
+| response | `yii\web\Response` | `Runtime\CoroutineResponse` | Bootstrap 自动 |
+| db | `yii\db\Connection` | `Db\CoroutineDbConnection` | Bootstrap 自动 |
+| redis | `yii\redis\Connection` | `Redis\CoroutineRedisConnection` | Bootstrap 自动 |
+| session | `yii\web\Session` | `Session\CoroutineSession` | **需显式配置** |
+| cache | — | `Cache\CoroutineRedisCache` | **需显式配置** |
+| queue | — | `Queue\CoroutineRedisQueue` | **需显式配置** |
+
+#### ⑥ 生产拓扑
+
+```
+客户端 ──HTTPS──► nginx ──┬─ 静态文件（root /app/public）
+                          └─ upstream yii2s（keepalive）
+                                ├─ 127.0.0.1:9501  swoole-cli yii swoole/start
+                                ├─ 127.0.0.1:9502
+                                ├─ 127.0.0.1:9503
+                                └─ 127.0.0.1:9504
+                                        │
+                     ┌──────────────────┴──────────────────┐
+                     ▼                                     ▼
+               MySQL（连接池 ≤ poolMaxActive）        Redis（连接池）
+                                                           ▲
+                                          php yii queue/serve（独立进程）
+```
+
+> 同端口 `SO_REUSEPORT` 多实例可用，但每个实例必须配独立 `pidFile`（示例配置读取
+> `SWOOLE_PID_FILE`），否则防重守卫会拒绝第二个进程；详见 4.2。
+
 ## 3.2 核心难点与设计决策
 
 | 难点 / 决策 | 对策与理由 |
@@ -242,11 +387,11 @@ swoole-cli example/yii swoole/start        （控制台入口，创建 console A
 | Yii2 设计给 FPM：请求结束进程清空，全局状态可随意用 | 常驻进程下禁止超全局变量；请求级状态全部协程隔离（§3.4） |
 | `$_GET/$_POST/$_SERVER/$_COOKIE/$_SESSION` 全进程共享，协程下会串请求 | `CoroutineRequest` 从 Swoole Request 对象取数；`CoroutineSession` 用 Redis 存储 + 协程内存 |
 | 单个 PDO 连接不能被多个协程并发使用 | 连接池 + **协程粘性借用**：每个协程借一条独立连接，事务期间强绑定 |
-| 长生命周期对象持有请求状态（request/response/user） | 每请求结束重建这四个组件、归还池连接、flush 日志 |
+| 长生命周期对象持有请求状态（request/response/user） | `CoroutineApplication` 按**协程**从配置定义创建四个组件（并发互不可见）；请求结束由 `RequestStateManager` 归还池连接、sweep、flush 日志 |
 | 池耗尽的错误路径 | 阻塞等待 + `waitTimeout` 超时抛异常，不无限等待；`poolMaxActive` 是并发硬边界 |
 | 泄漏回收机制 | `sweep()`（每请求结束由活跃协程同步执行）而非 `Coroutine::defer`——defer 阶段做 channel IO 在 Windows 构建实测崩溃，且 sweep 确定性更强 |
 | 借出登记数据结构 | 普通数组（`spl_object_id` 索引）而非 WeakMap——msys2 构建 WeakMap 跨协程写入不可见且会崩进程（独立脚本实锤） |
-| 多进程模型 | **多实例 + SO_REUSEPORT**（server factory 第 4 参），supervisor `numprocs=N` 内核负载均衡；进程内 fork 需重验证进程级状态隔离，不做 |
+| 多进程模型 | 多端口 + nginx upstream（默认推荐），或同端口 `SO_REUSEPORT`（每实例独立 `pidFile`，示例支持 `SWOOLE_PID_FILE`）；控制命令按单 pid 文件操作，多实例由 supervisor 管；进程内 fork 需重验证进程级状态隔离，不做 |
 | 静态文件 | PHP 层 `StaticFileServer`（可执行/敏感扩展黑名单 + dotfile 拦截）——**实测协程 `Http\Server` 完全忽略 `enable_static_handler`**；生产推荐 nginx 直出 |
 | 请求体解析 | 显式 pin `http_parse_files/post/cookie = true`——协程 `Http\Server` 的 `http_parse_files` 源码默认 **false**（`swoole_http.h`），不显式配置则上传静默为空 |
 | respawn 前置 `PHP_BINARY` | pid 文件存无解释器的脚本调用（入口无 shebang），不前置则 reload 永远失败（实测） |
@@ -274,11 +419,15 @@ release():
 
 ## 3.4 请求状态重建（`Runtime/RequestStateManager.php`）
 
-每个请求结束后：
+请求作用域的四个组件（request/response/session/user）由 `CoroutineApplication` 在**每个
+协程**里按配置定义创建，协程结束即随上下文回收，并发请求天然互不可见。
 
-1. 重新 `set('request'/'response'/'session'/'user', 原始定义)`，下个请求拿到全新实例；
-2. 遍历所有组件，调用实现了 `release()` 的组件归还池连接；
-3. `Yii::getLogger()->flush(true)` —— FPM 的"请求结束自动 flush 日志"在常驻进程不存在，必须手动做。
+`RequestStateManager` 负责请求结束后的收尾：
+
+1. 遍历已实例化的组件，调用实现了 `release()` 的组件（db/redis）归还池连接；
+2. 各池 `sweep()`：回收"借用协程已结束、未归还"的连接（如子协程泄漏）；
+3. 重置共享组件缓存（`set()` 回配置定义），作为非协程路径的兜底；
+4. `Yii::getLogger()->flush(true)` —— FPM 的"请求结束自动 flush 日志"在常驻进程不存在，必须手动做。
 
 ## 3.5 兼容性开关
 
@@ -299,10 +448,12 @@ src/
 ├── Session/CoroutineSession.php     Redis 会话（完全绕开 $_SESSION）
 ├── Queue/CoroutineRedisQueue.php    Redis 队列（ZSET：延迟投递/重试/死信）
 ├── Runtime/
+│   ├── CoroutineApplication.php     请求作用域组件按协程解析（并发请求互不可见）
 │   ├── CoroutineRequest.php         Swoole→Yii2 请求适配（含 cookie 签名验证、上传转换）
+│   ├── CoroutineUploadedFile.php    协程版 UploadedFile（不读 $_FILES，saveAs 走 rename/copy）
 │   ├── CoroutineResponse.php        内存 finalize（beforeSend/prepare/afterSend）
-│   ├── SwooleResponseSender.php     响应下发（headers/cookies/内容）
-│   └── RequestStateManager.php      每请求状态重建 + 统一回收
+│   ├── SwooleResponseSender.php     响应下发（headers/cookies/内容/文件流）
+│   └── RequestStateManager.php      请求结束回收（池 release/sweep + 日志 flush）
 ├── Server/
 │   ├── HttpServer.php               服务器生命周期（start/stop/watchdog/信号/flag watcher）
 │   ├── RequestDispatcher.php        请求分发（静态文件 / __pool / Yii2）
@@ -364,10 +515,31 @@ use Swoole\Coroutine;
 ## 4.2 生产部署（nginx + 多实例）
 
 标准架构：**nginx 负责静态文件与 TLS 终结，Swoole 服务器只处理动态请求**。
-多实例：`swoole/start` 已启用 `SO_REUSEPORT`，直接启动 N 个实例绑同一端口，
-由 supervisor/systemd 托管。
+多核部署用**多端口 + upstream**：每个实例监听一个端口、各自独立的 pid 文件，由
+supervisor/systemd 托管。
+
+> 同端口多实例（`SO_REUSEPORT`）**可用**，但每个实例必须有独立 pid 文件，否则
+> 防重复启动守卫会拒绝第二个进程。示例配置已支持环境变量：
+>
+> ```ini
+> command=/usr/local/bin/swoole-cli /var/www/app/yii swoole/start --host=127.0.0.1 --port=9501
+> environment=SWOOLE_PID_FILE="/var/www/app/runtime/swoole-%(process_num)02d.pid"
+> numprocs=4
+> ```
+>
+> `swoole/stop`/`status`/`reload` 按单个 pid 文件操作，这种模式下由 supervisor
+> 管生命周期；要用控制台命令管理多实例，仍推荐多端口 + upstream。
+> `scripts/wsl-e2e.sh` 已覆盖“两实例同端口、都返回 200”的回归。
 
 ```nginx
+upstream yii2s {
+    server 127.0.0.1:9501;
+    server 127.0.0.1:9502;
+    server 127.0.0.1:9503;
+    server 127.0.0.1:9504;
+    keepalive 64;
+}
+
 server {
     listen 80;
     server_name example.com;
@@ -382,35 +554,61 @@ server {
     }
 
     location / {
-        proxy_pass http://127.0.0.1:9501;
+        proxy_pass http://yii2s;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection "";
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+        client_max_body_size 8m;     # 与 Swoole package_max_length 对齐
     }
 }
 ```
 
 ```ini
 [program:yii2s]
-command=/usr/local/bin/swoole-cli /var/www/app/yii swoole/start --host=127.0.0.1 --port=9501
-numprocs=4                      ; 4 个实例共享 9501 端口（reuse_port）
+command=/usr/local/bin/swoole-cli /var/www/app/yii swoole/start --host=127.0.0.1 --port=950%(process_num)02d
 process_name=%(program_name)s_%(process_num)02d
+numprocs=4
 autostart=true
 autorestart=true                ; 实例退出即自动拉起（等价于 reload 的生产形态）
 stopsignal=TERM                 ; 触发优雅停机
-stopwaitsecs=25
+stopwaitsecs=25                 ; 必须大于 gracefulTimeout(10s)
 ```
 
 要点：
 
-- `X-Forwarded-Proto/For` 会被 `CoroutineRequest` 自动识别（HTTPS 判定、真实 IP）；
-  直连部署（无 nginx）建议显式 `secureProtocolHeaders => []` 关闭代理头信任；
-- 静态文件由 nginx 直接返回，`documentRoot` 此时不需要；
-- 队列消费独立运行：`php yii queue/serve`，同样用 supervisor 托管。
+- **真实客户端 IP**：`getUserIP()` 默认只返回 `remote_addr`。要让限流/审计看到真实
+  IP，需显式开启代理信任（nginx 与 Swoole 同机时只信任 127.0.0.1 即可）：
+
+  ```php
+  'request' => [
+      'class' => \Yii2S\Swoole\Runtime\CoroutineRequest::class,
+      'trustedProxies' => ['127.0.0.1', '::1'],   // 或 '10.0.0.0/8'
+  ],
+  ```
+
+  之后 `X-Forwarded-For` 按“从右往左取第一个非可信地址”解析；不可信来源仍只认
+  `remote_addr`，客户端无法伪造。未配置时行为与 stock Yii 一致。
+- **HTTPS 判定**：`X-Forwarded-Proto` 按 `secureProtocolHeaders` 读取；直连部署（无 nginx）
+  建议显式 `secureProtocolHeaders => []` 关闭代理头信任。
+- **请求体大小**：Swoole `settings.package_max_length` 默认 2MB；上传更大文件时同时调整
+  nginx `client_max_body_size` 与 `package_max_length`。
+- **上传落盘**：业务代码必须改用 `Runtime\CoroutineUploadedFile`（stock `saveAs()` 在
+  Swoole 下恒失败，且读全局 `$_FILES`）。
+- **连接池容量**：`poolMaxActive × 实例数 ≤ MySQL max_connections`，Redis 同理。
+- **超时**：MySQL 建议配置 `PDO::ATTR_TIMEOUT` / `innodb_lock_wait_timeout`，避免一个锁
+  等待长期占住池连接。
+- **健康检查**：包内没有 `/health`；在应用里加一条轻量路由，或让 nginx 探静态文件；
+  `/__pool` 只在内网开启。
+- **生产开关**：`YII_DEBUG=false`；静态文件由 nginx 直接返回，`documentRoot` 可去掉；
+  队列消费 `php yii queue/serve` 同样用 supervisor 托管。
+- **压缩**：Swoole 默认按 `Accept-Encoding` 压缩响应。nginx 已开 gzip/brotli 时建议
+  `settings => ['http_compression' => false]`，避免重复压缩；实测纯框架路径带压缩
+  比不带低约 10%，小响应甚至会被压大（34B → 38B）。
 
 ## 4.3 调试
 
@@ -460,34 +658,90 @@ total_borrowed=14144、total_timeouts=0、active=0/idle=20——**零泄漏**。
 
 ## 5.1 测试体系
 
-98 tests / 403 assertions，覆盖九大目录：连接池并发（借还配对/超时/sweep）、
+164 tests / 713 assertions（2 skipped），覆盖十一个目录：连接池并发（借还配对/超时/sweep）、
 请求适配（头/cookie 签名/上传三种形状）、服务器集成（**真实 socket 交互，非 mock**：
 CSRF 全流程、表单三件套、静态文件、优雅停机、watch 热重载）、DB（事务含嵌套
 savepoint、并发 AR + 并发事务、Query::batch、协程外 detached 直连）、Redis
 （MULTI/PIPELINE）、Cache（七类型循环 + TTL）、Session（登录→regenerateID→
-跨请求恢复→logout）、Queue（延迟/重试/死信/空队列）、Log（缓冲/轮转窗口）。
+跨请求恢复→logout→flash）、Queue（延迟/重试/死信/空队列）、Log（缓冲/轮转窗口）、
+框架特性回归（AR 全量、关联/with/joinWith、三套事务 API、校验器全家族、
+行为/事件、助手函数、web 运行时）、**功能兼容矩阵**（`tests/compat/`，见 5.4）。
 
 ## 5.2 验证矩阵
 
 | 运行时 | 测试 | 用途 |
 |---|---|---|
-| WSL Ubuntu + swoole-cli 6.2.2 | 98/403 ✅（连跑多次稳定） | 端到端（start/status/reload respawn/SIGTERM）+ 基准 |
-| WSL Ubuntu + pecl PHP 8.5 / swoole 6.2.4 | 98/403 ✅ | **CI 同源标准构建**（`http_parse_files` 修复的实战检验） |
-| GitHub Actions（待首跑） | pecl 矩阵 PHP 8.1–8.4 | 云端矩阵 |
-| Windows 预构建机 | phpstan / cs-fixer（纯 PHP 工具链） | 静态分析 |
+| macOS + swoole-cli 6.2.0 / PHP 8.4 | 164/713 ✅（2 skipped） | 全套集成测试（真实 socket、优雅停机、watch、pid）+ PHPStan + cs |
+| macOS + swoole-cli（进程级 e2e / 基准） | e2e 13 checks / 8148-3330-3616 QPS | start/status/reload respawn/SIGTERM 全过；`/`、`/demo/db`、`/demo/redis`（50 并发 3s，0 错误、池零超时） |
+| WSL Ubuntu + swoole-cli 6.2.2 | 164/713 ✅ | 端到端（start/status/reload respawn/SIGTERM）+ 基准 |
+| WSL Ubuntu + pecl PHP 8.5 / swoole 6.2.4 | 164/713 ✅ | **CI 同源标准构建**（`http_parse_files` 修复的实战检验） |
+| GitHub Actions | pecl 矩阵 PHP 8.2–8.5 | 云端矩阵 |
 
-独立外部 AI 评审两轮（见附录 B）：第一轮 6 缺陷全部修复，第二轮增量 2 项
-（e2e 脚本 pid 路径漂移、`.gitattributes` 根治 CRLF）已验证落地。
+独立外部 AI 评审四轮（见附录 B）：第一轮 6 缺陷、第二轮 2 项增量、第三轮
+（安全专项）7 处缺陷、第四轮（升级兼容性专项）8 处缺陷，均已修复并由新用例钉死。
 
-## 5.3 本地验证入口（Linux/WSL）
+## 5.3 本地验证入口（Linux/WSL 与 macOS）
 
 ```bash
 composer test    # PHPUnit（需要本地 MySQL/Redis；tests/console、tests/web 已含在套件）
 composer static  # PHPStan level 5
 composer cs      # php-cs-fixer（与官方 yii2 同规则）
-bash scripts/wsl-e2e.sh     # 端到端：start/status/reload respawn/SIGTERM
-bash scripts/wsl-bench.sh   # 基准：13706 QPS（纯框架）零错误
+bash scripts/wsl-e2e.sh     # 进程级端到端：start/status/reload respawn/SIGTERM（macOS/Linux）
+bash scripts/wsl-bench.sh   # 基准：`/`、`/demo/db`、`/demo/redis`（macOS/Linux，可用 CONCURRENCY/DURATION 覆盖）
 ```
+
+macOS 上用 swoole-cli 跑同一套用例（系统 PHP 一般没有 swoole 扩展）：
+
+```bash
+swoole-cli vendor/bin/phpunit --no-coverage
+swoole-cli vendor/bin/phpstan analyse --memory-limit=-1
+swoole-cli vendor/bin/php-cs-fixer check --diff
+```
+
+> 用系统 PHP 拉依赖时若版本低于 8.2，加
+> `--ignore-platform-req=php --ignore-platform-req=ext-swoole` 即可完成 `composer install`
+> （依赖本身是纯 PHP；实际运行由 swoole-cli 提供 PHP 8.4 + swoole）。
+> 注意 swoole-cli 内置 curl 访问 Packagist 会崩，装依赖请用系统 PHP 的 composer。
+
+## 5.4 功能点兼容矩阵（`tests/compat/`）
+
+升级到 Swoole 后"还能不能用"的验收清单：每一项都由**真实 socket 请求**打到
+`tests/data/app-compat.php`（带 session/user/db/redis/cache/log 的完整应用），
+不再按组件单测，而是走完整请求生命周期。
+
+| 功能域 | 覆盖点 | 用例 |
+|---|---|---|
+| 路由与 URL | 规则匹配、参数绑定/类型转换、默认路由、404、`Url::to` 相对/绝对、baseUrl | `testRoutingRulesAndUrlGeneration` |
+| 请求对象 | query、表单、JSON body、raw body、自定义头、UA、isAjax、pathInfo、hostInfo、userIP、PUT 等方法 | `testRequestObjectInputs` |
+| 真实客户端 IP | `trustedProxies`（IP/CIDR）时按 `X-Forwarded-For` 从右往左解析；不可信来源忽略转发头 | `testRequestObjectInputs`、`testOneLineBootstrapOnFirstRequest` |
+| 响应与格式 | JSON/XML/HTML/RAW 格式化、状态码、自定义响应头 | `testResponseFormatsAndStatus` |
+| 重定向 | 302 + Location 可达 | `testRedirect` |
+| Cookie | 签名下发/回读、篡改丢弃 | `testSignedCookies` |
+| CSRF | token 签发、缺失 400、正确 200、错误 400 | `testCsrfProtection` |
+| 会话 | 跨请求持久、新客户端隔离、id 稳定 | `testSessionLifecycle` |
+| 登录/登出 | identity 恢复、session id 重生成、登录前数据保留 | `testAuthenticationLifecycle` |
+| Flash | set → 下次请求可见 → 读后下次消失 | `testFlashMessages` |
+| 上传 | 单文件 / `files[0..n]`、字节级 sha1 校验 | `testUploads` |
+| 上传落盘 | `CoroutineUploadedFile::saveAs()`（替代不可用的 `move_uploaded_file()`）、并发上传不串文件 | `testCoroutineUploadedFileSaves`、`testConcurrentUploadsAreIsolated` |
+| 下载 | `sendFile()` 全量、Range 206、越界 416 | `testFileDownloads` |
+| 错误处理 | HttpException 状态码、未知路由 404、未捕获异常 500 | `testErrorHandling` |
+| 错误页 | 异常经 `errorHandler.errorAction` 渲染成自定义错误视图（而非纯文本兜底） | `testErrorActionRendersCustomErrorPage` |
+| 一行接入 | `Bootstrap` 自动替换组件在**首请求**即生效（`yii\web\Application::bootstrap()` 预先创建的 stock 实例被丢弃） | `testOneLineBootstrapOnFirstRequest` |
+| 常驻服务 | DB 事务回滚、Cache、Redis、子协程连接池、日志落盘 | `testResidentServices` |
+| 并发隔离 | 并发请求的 query 不串、会话/身份不串 | `testConcurrentRequestsAreIsolated`、`testConcurrentSessionsAndIdentitiesAreIsolated` |
+
+非 HTTP 域由既有目录覆盖：AR/关联/事务/校验器/行为/助手（`tests/framework/`）、
+连接池（`tests/pools/`）、DB（`tests/db/`）、Redis（`tests/redis/`）、
+Cache（`tests/cache/`）、Session（`tests/session/`）、Queue（`tests/queue/`）、
+Log（`tests/log/`）、控制台（`tests/console/`）、上传/web（`tests/web/`）。
+
+**扩展方式**：在 `tests/compat/CompatController.php` 加一个 action 暴露该功能，
+再到 `CompatHttpFeaturesTest` 加一个方法（`withServer()` 内部即真实请求），
+同时在 `tests/data/app-compat.php` 里补齐该功能需要的组件配置。
+
+另有一条**真实示例**的端到端检查：`examples/blog/scripts/smoke.sh`（52 项）
+会启动博客服务并用 curl 走完前台/登录+CSRF/评论/封面上传+静态文件/CSV 下载/
+队列 worker/25 并发，适合在改完包后做一次"真项目回归"。
 
 ### example 自举说明（隐性依赖）
 
@@ -633,7 +887,7 @@ $pool = new ConnectionPool(
 23. **WSL mirrored 网络模式** —— Windows 侧服务可被 WSL 以 `127.0.0.1` 直连
     （`.wslconfig` 设 `networkingMode=mirrored`）。
 24. **nohup 后台进程随 wsl.exe 会话退出被杀** —— 长任务前台执行或用宿主侧调度。
-25. **pid 文件默认路径随配置变化** —— `sys_get_temp_dir()/yii2s-swoole-{host}-{port}.pid`；
+25. **pid 文件默认路径随配置变化** —— `sys_get_temp_dir()/yii2s-swoole-{euid}/{host}-{port}.pid`（按用户隔离的子目录，避免 /tmp 里被他人预创建/软链）；
     外部脚本不要硬编码 example 的旧路径（曾致 e2e SIGTERM 步骤必失败）。
 26. **外部评审的修复要"逐项 git 考古"甄别** —— 第二轮评审把第一轮已修复项当新发现
     重报（工作线基于旧快照）；但增量部分仍抓到真问题（脚本与配置漂移、.gitattributes）。
@@ -661,7 +915,7 @@ $pool = new ConnectionPool(
 
 | # | 声称 | 验证方法 |
 |---|---|---|
-| C1 | 请求状态严格隔离，并发请求互不污染 | `tests/runtime/`、`tests/server/HttpServerTest.php`；或压测中并发请求带不同参数验证响应不串 |
+| C1 | 请求状态严格隔离，并发请求互不污染 | `tests/compat/`（并发参数/会话/身份三组用例）；`tests/runtime/`、`tests/server/HttpServerTest.php` |
 | C2 | 连接池并发安全，借还配对，子协程泄漏由 sweep() 兜底 | `tests/pools/ConnectionPoolTest.php`；压测后 `/__pool` 看 active 归 0 |
 | C3 | 静态文件防路径穿越与敏感文件泄露 | `tests/server/HttpServerStaticTest.php`；`curl --path-as-is /../config/web.php`（应 404）、`/secret.php`（应 404） |
 | C4 | CSRF 完整可用（含 SameSite 下发） | `tests/server/HttpServerCsrfTest.php`（签发→无 token 400→带 token 200） |
@@ -675,6 +929,8 @@ $pool = new ConnectionPool(
 | C12 | Linux 基准 13706 QPS，池零泄漏 | `scripts/wsl-bench.sh` + `/__pool`（total_timeouts=0, active=0） |
 | C13 | Cookie 签名验证（入站验证 + 出站签名） | `tests/runtime/CoroutineRequestTest.php`（篡改丢弃）+ `HttpServerCsrfTest`（往返） |
 | C14 | 上传三种形状归一化 + `$_FILES` 官方 API 通路 | `tests/server/HttpServerFormTest.php`（sha1 字节级验证） |
+| C15 | 升级后 Yii2 功能点端到端可用（路由/请求/响应格式/重定向/Cookie/CSRF/会话/登录/Flash/上传/下载/错误/常驻服务） | `tests/compat/CompatHttpFeaturesTest.php`（真实 socket，见 5.4 矩阵） |
+| C16 | 并发请求的会话与身份互不串 | `tests/compat/::testConcurrentSessionsAndIdentitiesAreIsolated` |
 
 ### 建议切入顺序
 
@@ -686,7 +942,7 @@ $pool = new ConnectionPool(
 
 ---
 
-# 附录 B · 安全评审记录（两轮）
+# 附录 B · 安全评审记录（四轮）
 
 ### 第一轮——6 缺陷全部修复
 
@@ -708,8 +964,33 @@ $pool = new ConnectionPool(
 - 第二轮在当前 HEAD 的独立验证与本方结果吻合：87→98 tests 全绿、
   e2e respawn（pid 变化）、基准 13887/2940/5871 QPS 零错误、池零泄漏。
 
+### 第三轮——安全专项（7 处缺陷全部修复）
+
+| # | 缺陷 | 严重度 | 修复 |
+|---|---|---|---|
+| S1 | 静态文件先查 `\0` 再 urldecode：`%00` 路径让 `realpath()` 抛 ValueError，协程内未捕获异常可打挂 worker | 高 | 解码后再校验（空字节/反斜杠/`..` 段），预分发加兜底 try/catch |
+| S2 | Cookie 反序列化未限制 `allowed_classes`（弱 `cookieValidationKey` 下可对象注入） | 中 | 对齐 stock `yii\web\Request`：`['allowed_classes' => false]` |
+| S3 | `useStrictMode` 被静默忽略 → 会话固定 | 中 | 真正存值并在 open() 强制：客户端自带且不存在的 id 一律重生成 |
+| S4 | pid 文件默认落 `/tmp` 且路径可预测（软链覆盖 / reload 命令链） | 中 | 按用户隔离目录 + 拒软链 + 0600 + LOCK_EX |
+| S5 | SIGTERM 直接 `shutdown()`，不排在途请求（supervisor 场景） | 中 | 信号只置标志，专用协程执行 graceful stop |
+| S6 | 请求异常不落日志 | 低 | `handleException()` 记 `Yii::error` |
+| S7 | `examples/blog` API 越权删除（IDOR） | 低 | 作者校验，非本人 403 |
+
+### 第四轮——升级兼容性专项（`tests/compat/`，5 处缺陷全部修复）
+
+| # | 缺陷 | 严重度 | 修复 |
+|---|---|---|---|
+| K1 | 并发请求共用 request/response/session/user 实例：请求参数、会话、身份可跨请求串号（只有并发用例能暴露；单请求/同参数压测看不出来） | 极高 | 新增 `Runtime\CoroutineApplication`：四个 id 按协程从配置定义创建；默认 `yii\web\Application` 自动替换，自定义 App 类记 warning 且 `swoole/check` 判 FAIL |
+| K2 | 登录后所有请求仍是 guest：`Session::getHasSessionId()` 读 `$_COOKIE`，而 Swoole 不填充超全局 | 极高 | 覆盖 `getHasSessionId()`，改读协程请求的 cookie |
+| K3 | `Session` 的 flash 全套方法直接操作 `$_SESSION`（进程级全局） | 中 | 按官方计数器语义在 `$this->data` 上重写 `setFlash/addFlash/getFlash/getAllFlashes/removeFlash/removeAllFlashes/updateFlashCounters` |
+| K4 | `regenerateID()` 在会话未打开时用空数据落库，登录会丢登录前的会话数据（购物车/returnUrl） | 中 | 换 id 前先加载现有 payload |
+| K5 | `Response::sendFile()`/`sendStreamAsFile()` 不下发文件体（只发 headers） | 中 | `SwooleResponseSender` 支持 stream：分块写出、Range 206、流式响应跳过 Content-Length |
+| K6 | 上传落盘不可用：stock `UploadedFile::saveAs()` 走 `move_uploaded_file()`，而 Swoole 写的临时文件不在 PHP 上传登记表 → 默认参数恒 false；且 stock 读 `$_FILES`，并发下会串文件 | 中 | 新增 `Runtime\CoroutineUploadedFile`（从当前协程请求取文件、rename/copy 落盘），并发上传用例钉死 |
+| K7 | "一行接入"在**首请求**失效：`yii\web\Application::bootstrap()` 先解析 `request` 并缓存 stock 实例，`Bootstrap` 的组件替换在其后执行；首请求报 `Unable to determine the request URI`，`@webroot`/`@web` 也被控制台入口带偏 | 高 | `CoroutineApplication::forgetComponent()` 丢弃已缓存实例 + `Bootstrap::syncWebAliases()` 校正别名；`testOneLineBootstrapOnFirstRequest` 钉死 |
+| K8 | 异常绕过 Yii 的 ErrorHandler：`errorHandler.errorAction`、`views/site/error.php`、AJAX 的 JSON 错误都不生效，只剩调度器的纯文本 | 中 | `RequestDispatcher::renderExceptionResponse()`（状态码/JSON/HTML + `errorAction` + `finalize()`），`testErrorActionRendersCustomErrorPage` 钉死 |
+
 ### 评审过但判定无需修复的点
 
 `StaticFileServer` 路径穿越（realpath 前缀已拦截）、连接池 `size` 计数与 `sweep()`
-竞态、`resolve()` 参数合并顺序（与 Yii2 一致）、会话固定（`regenerateID()` 已覆盖）、
+竞态、`resolve()` 参数合并顺序（与 Yii2 一致）、
 `flushValues()` SCAN 防御（executeCommand 已转异常）。

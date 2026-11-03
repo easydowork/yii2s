@@ -2,20 +2,107 @@
 
 namespace app\controllers;
 
+use app\components\BlogJobs;
+use app\models\Comment;
 use app\models\Post;
+use Yii;
 use yii\data\Pagination;
 use yii\web\Controller;
+use yii\web\ErrorAction;
+use yii\web\NotFoundHttpException;
 
 class SiteController extends Controller
 {
-    public function actionIndex(): string
+    private const PAGE_SIZE = 5;
+
+    public function actions(): array
     {
-        $query = Post::find()->where(['status' => Post::STATUS_PUBLISHED])->orderBy(['created_at' => SORT_DESC]);
+        return [
+            'error' => ['class' => ErrorAction::class],
+        ];
+    }
 
-        $pages = new Pagination(['totalCount' => (int) $query->count(), 'pageSize' => 5]);
-        $posts = $query->offset($pages->offset)->limit($pages->limit)->all();
+    /**
+     * Cached front page. The pagination is built explicitly: yii\data\Pagination
+     * reads the page from $request->getQueryParams() (safe here), but the page
+     * number is passed in so the cached payload and the pager always agree.
+     */
+    public function actionIndex(int $page = 1): string
+    {
+        $page = max(1, $page);
+        $version = BlogJobs::listVersion();
 
-        return $this->render('index', ['posts' => $posts, 'pages' => $pages]);
+        $data = Yii::$app->cache->getOrSet(
+            'blog:index:' . $version . ':' . $page,
+            function () use ($page): array {
+                $query = Post::find()
+                    ->with('author')
+                    ->where(['status' => Post::STATUS_PUBLISHED])
+                    ->orderBy(['created_at' => SORT_DESC]);
+
+                $total = (int) $query->count();
+                $pagination = new Pagination(['totalCount' => $total, 'pageSize' => self::PAGE_SIZE]);
+                $pagination->setPage($page - 1);
+
+                return [
+                    'total' => $total,
+                    'posts' => $query->offset($pagination->offset)->limit($pagination->limit)->all(),
+                ];
+            },
+            30
+        );
+
+        $pages = new Pagination(['totalCount' => $data['total'], 'pageSize' => self::PAGE_SIZE]);
+        $pages->setPage($page - 1);
+
+        return $this->render('index', ['posts' => $data['posts'], 'pages' => $pages]);
+    }
+
+    public function actionView(int $id): string
+    {
+        $post = $this->findPublished($id);
+
+        return $this->render('view', [
+            'post' => $post,
+            'views' => $this->countView($post),
+            'comments' => Comment::approvedFor((int) $post->id),
+            'comment' => new Comment(['post_id' => (int) $post->id]),
+        ]);
+    }
+
+    /**
+     * Public comment form: CSRF-protected POST -> validation -> pending row ->
+     * flash -> redirect (the classic Yii2 flow, unchanged under coroutines).
+     */
+    public function actionComment(int $id)
+    {
+        $post = $this->findPublished($id);
+
+        if (!Yii::$app->request->getIsPost()) {
+            Yii::$app->session->setFlash('error', 'Comments must be submitted through the form.');
+
+            return $this->redirect(['view', 'id' => $post->id]);
+        }
+
+        $comment = new Comment(['post_id' => (int) $post->id]);
+        if ($comment->load(Yii::$app->request->post()) && $comment->validate()) {
+            // Never trust the payload for these three fields.
+            $comment->post_id = (int) $post->id;
+            $comment->status = Comment::STATUS_PENDING;
+            $comment->ip = (string) Yii::$app->request->getUserIP();
+            $comment->save(false);
+
+            Yii::$app->session->setFlash('success', 'Comment submitted - it will appear after moderation.');
+
+            return $this->redirect(['view', 'id' => $post->id]);
+        }
+
+        return $this->render('view', [
+            'post' => $post,
+            'views' => $this->countView($post, false),
+            'comments' => Comment::approvedFor((int) $post->id),
+            'comment' => $comment,
+        ]);
     }
 
     public function actionVue()
@@ -24,13 +111,45 @@ class SiteController extends Controller
         return $this->redirect('/vue/index.html');
     }
 
-    public function actionView(int $id): string
+    /**
+     * Dev-only 500 probe: proves uncaught exceptions reach the configured
+     * error page (`errorHandler.errorAction`) and are written to the log.
+     */
+    public function actionBoom(): void
     {
-        $post = Post::findOne(['id' => $id, 'status' => Post::STATUS_PUBLISHED]);
-        if ($post === null) {
-            throw new \yii\web\NotFoundHttpException('Post not found.');
+        if (!YII_DEBUG) {
+            throw new NotFoundHttpException('Not available.');
         }
 
-        return $this->render('view', ['post' => $post]);
+        throw new \RuntimeException('blog-boom-for-error-page');
+    }
+
+    private function findPublished(int $id): Post
+    {
+        $post = Post::find()
+            ->with('author')
+            ->where(['id' => $id, 'status' => Post::STATUS_PUBLISHED])
+            ->one();
+        if ($post === null) {
+            throw new NotFoundHttpException('Post not found.');
+        }
+
+        return $post;
+    }
+
+    /**
+     * Redis-backed counter on top of the database baseline. Two round trips
+     * per page view - a small but realistic hot-path load for the pool.
+     */
+    private function countView(Post $post, bool $increment = true): int
+    {
+        $key = 'blog:views:' . $post->id;
+        if ($increment) {
+            Yii::$app->redis->incr($key);
+        }
+
+        $delta = Yii::$app->redis->get($key);
+
+        return (int) $post->views + (is_numeric($delta) ? (int) $delta : 0);
     }
 }

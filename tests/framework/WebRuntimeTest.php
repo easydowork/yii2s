@@ -1,5 +1,11 @@
 <?php
 
+/**
+ * @link https://github.com/yii2s/yii2-swoole
+ * @copyright Copyright (c) 2026 Yii2S Software LLC
+ * @license MIT
+ */
+
 declare(strict_types=1);
 
 namespace yii2stest\framework;
@@ -49,26 +55,25 @@ class WebRuntimeTest extends TestCase
 
     public function testSessionFlashLifecycle(): void
     {
-        $this->markTestSkipped("Flash cross-session persistence needs CoroutineSession __flash counter adaptation - see TODO");
         $this->runInCoroutine(function (): void {
-            $this->session->setId("flash-test-" . bin2hex(random_bytes(8)));
-            $this->session->open();
+            $sessionId = "flash-test-" . bin2hex(random_bytes(8));
+            $this->session->setId($sessionId);
             $this->session->setFlash("success", "Operation completed");
-            $this->assertSame("Operation completed", $this->session->getFlash("success", null, false));  // read without consuming
             $this->session->close();
 
-            // Flash persists to next request (same session)
+            // Request 2: not read yet, so the flash is still visible.
             $s2 = new CoroutineSession(["redis" => $this->session->redis]);
-            $s2->setId($this->session->getId());
+            $s2->setId($sessionId);
             $s2->open();
             $this->assertSame("Operation completed", $s2->getFlash("success"));
             $s2->close();
 
-            // After getFlash, flash is consumed (removed)
+            // Request 3: the counter aged during open(), the message is gone.
             $s3 = new CoroutineSession(["redis" => $this->session->redis]);
-            $s3->setId($this->session->getId());
+            $s3->setId($sessionId);
             $s3->open();
-            $this->assertNull($s3->getFlash("success"), "flash consumed after read");
+            $this->assertNull($s3->getFlash("success"), "flash is removed one request after the read");
+            $this->assertFalse($s3->hasFlash("success"));
             $s3->close();
         });
     }

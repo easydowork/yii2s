@@ -75,6 +75,10 @@ class Bootstrap implements BootstrapInterface
             $this->replaceComponents($app);
         }
 
+        if ($app instanceof WebApplication) {
+            $this->syncWebAliases($app);
+        }
+
         if ($app instanceof ConsoleApplication) {
             $this->registerConsoleControllers($app);
         }
@@ -123,7 +127,30 @@ class Bootstrap implements BootstrapInterface
 
             $definition['class'] = $map[$class];
             $app->set($id, $definition);
+
+            // yii\web\Application::bootstrap() resolves `request` (and thus
+            // caches a stock instance) before this bootstrap runs. Drop it so
+            // the current request picks up the coroutine class as well.
+            if ($app instanceof Runtime\CoroutineApplication) {
+                Runtime\CoroutineApplication::forgetComponent($id);
+            }
         }
+    }
+
+    /**
+     * Re-derives @webroot/@web after the component swap: the stock request
+     * used by `yii\web\Application::bootstrap()` computes them from the
+     * console entry script, which is the application root - not the web root.
+     */
+    private function syncWebAliases(WebApplication $app): void
+    {
+        $request = $app->getRequest();
+        if (!$request instanceof Runtime\CoroutineRequest) {
+            return;
+        }
+
+        Yii::setAlias('@webroot', dirname($request->getScriptFile()));
+        Yii::setAlias('@web', $request->getBaseUrl());
     }
 
     /**

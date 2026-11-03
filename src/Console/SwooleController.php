@@ -256,6 +256,21 @@ class SwooleController extends Controller
         }
         $components = $webConfig['components'] ?? [];
 
+        // --- application class: per-coroutine request-scoped components ---
+        $appClass = is_string($webConfig['class'] ?? null) ? $webConfig['class'] : \yii\web\Application::class;
+        $isolated = $appClass === \yii\web\Application::class
+            || is_a($appClass, \Yii2S\Swoole\Runtime\CoroutineApplication::class, true);
+        $report(
+            $isolated,
+            $isolated
+                ? sprintf('application class "%s" isolates request-scoped components per coroutine', $appClass)
+                : sprintf(
+                    'application class "%s" must extend %s, otherwise request/response/session/user are shared between concurrent requests',
+                    $appClass,
+                    \Yii2S\Swoole\Runtime\CoroutineApplication::class
+                )
+        );
+
         // --- web request requirements ---
         $requestDef = $components['request'] ?? null;
         $key = is_array($requestDef) ? ($requestDef['cookieValidationKey'] ?? '') : null;

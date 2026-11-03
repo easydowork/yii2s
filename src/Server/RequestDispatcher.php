@@ -11,6 +11,7 @@ declare(strict_types=1);
 namespace Yii2S\Swoole\Server;
 
 use Yii2S\Swoole\Pools\PoolMetricsCollector;
+use Yii2S\Swoole\Runtime\CoroutineApplication;
 use Yii2S\Swoole\Runtime\CoroutineRequest;
 use Yii2S\Swoole\Runtime\CoroutineResponse;
 use Yii2S\Swoole\Runtime\RequestStateManager;
@@ -136,12 +137,22 @@ class RequestDispatcher implements RequestDispatcherInterface
 
     public function dispatch(Request $swooleRequest, Response $swooleResponse, SwooleCoroutineHttpServer $server): void
     {
-        if ($this->tryServeStaticFile($swooleRequest, $swooleResponse)) {
-            return;
-        }
+        // Static files and the metrics endpoint run outside the Yii request
+        // lifecycle. A malformed path must never escape as an uncaught
+        // exception: inside a coroutine that terminates the worker.
+        try {
+            if ($this->tryServeStaticFile($swooleRequest, $swooleResponse)) {
+                return;
+            }
 
-        if ($this->tryServePoolMetrics($swooleRequest, $swooleResponse)) {
-            return;
+            if ($this->tryServePoolMetrics($swooleRequest, $swooleResponse)) {
+                return;
+            }
+        } catch (Throwable $exception) {
+            Yii::error('Pre-dispatch request handling failed: ' . $exception->getMessage(), __METHOD__);
+            if (!$swooleResponse->isWritable()) {
+                return;
+            }
         }
 
         $app = $this->getApplication();
@@ -212,6 +223,19 @@ class RequestDispatcher implements RequestDispatcherInterface
         }
         unset($config['class']);
 
+        if ($class === WebApplication::class) {
+            // Default application class: swap in the coroutine-aware subclass
+            // so request/response/session/user are created per coroutine
+            // instead of being shared by concurrent requests.
+            $class = CoroutineApplication::class;
+        } elseif (!is_a($class, CoroutineApplication::class, true)) {
+            Yii::warning(sprintf(
+                'Application class "%s" does not extend %s: request/response/session/user are shared between concurrent requests.',
+                $class,
+                CoroutineApplication::class
+            ), __METHOD__);
+        }
+
         $this->application = new $class($config);
 
         return $this->application;
@@ -219,8 +243,47 @@ class RequestDispatcher implements RequestDispatcherInterface
 
     private function handleException(Response $swooleResponse, Throwable $exception): void
     {
+        // Exceptions never reach Yii's own error handler here (the request is
+        // handled manually), so log them explicitly - otherwise failed
+        // requests leave no trace in the application log.
+        try {
+            Yii::error(
+                sprintf(
+                    'Unhandled request exception: %s: %s in %s:%d',
+                    $exception::class,
+                    $exception->getMessage(),
+                    $exception->getFile(),
+                    $exception->getLine()
+                ),
+                __METHOD__
+            );
+        } catch (Throwable) {
+            // Logging must never mask the response.
+        }
+
         if (!$swooleResponse->isWritable()) {
             return;
+        }
+
+        // Render through the application's error handler (errorAction / custom
+        // error view / JSON for AJAX requests) like a normal Yii2 request.
+        try {
+            $errorResponse = $this->renderExceptionResponse($exception);
+        } catch (Throwable $renderError) {
+            $errorResponse = null;
+            try {
+                Yii::error('Failed to render the error response: ' . $renderError->getMessage(), __METHOD__);
+            } catch (Throwable) {
+            }
+        }
+        if ($errorResponse !== null) {
+            try {
+                $this->responseSender->send($swooleResponse, $errorResponse);
+
+                return;
+            } catch (Throwable) {
+                // Fall through to the plain-text response below.
+            }
         }
 
         $swooleResponse->status($this->resolveStatusCode($exception));
@@ -235,6 +298,53 @@ class RequestDispatcher implements RequestDispatcherInterface
         }
 
         $swooleResponse->end($body);
+    }
+
+    /**
+     * Builds the response Yii2 would produce for this exception: the
+     * configured `errorHandler.errorAction` (e.g. `site/error`) with the
+     * proper status code, or null when the application has no error action.
+     */
+    private function renderExceptionResponse(Throwable $exception): ?\yii\web\Response
+    {
+        $app = $this->application;
+        if ($app === null) {
+            return null;
+        }
+
+        $handler = $app->getErrorHandler();
+        if ($handler->errorAction === null) {
+            return null;
+        }
+
+        $response = $app->getResponse();
+        $response->clear();
+        $response->statusCode = $this->resolveStatusCode($exception);
+        $response->format = $app->getRequest()->getIsAjax()
+            ? \yii\web\Response::FORMAT_JSON
+            : \yii\web\Response::FORMAT_HTML;
+
+        $handler->exception = $exception;
+        try {
+            $result = $app->runAction($handler->errorAction);
+        } finally {
+            $handler->exception = null;
+        }
+
+        if ($result instanceof \yii\web\Response) {
+            return $result;
+        }
+
+        $response->data = $result;
+        // The normal dispatch path finalizes the response before sending;
+        // this branch returns early, so run the formatter here.
+        if ($response instanceof CoroutineResponse) {
+            $response->finalize();
+        } elseif (is_string($result)) {
+            $response->content = $result;
+        }
+
+        return $response;
     }
 
     /**

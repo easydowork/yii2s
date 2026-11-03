@@ -87,6 +87,10 @@ return [
         'swooleHttpServer' => [
             'class' => \Yii2S\Swoole\Server\HttpServer::class,
             'port' => 9501,
+            // Same-port multi-instance: SO_REUSEPORT is already enabled, but
+            // each process needs its own pid file (otherwise the start guard
+            // rejects the second one). supervisor can pass a per-process path.
+            'pidFile' => getenv('SWOOLE_PID_FILE') ?: null,
             'documentRoot' => '@app/public',
             'dispatcher' => new \Yii2S\Swoole\Server\RequestDispatcher(__DIR__ . '/web.php', [
                 'enablePoolMetricsEndpoint' => true,

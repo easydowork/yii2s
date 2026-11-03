@@ -21,6 +21,7 @@
 | PHP | >= 8.2（实测 8.4 / 8.5；Swoole 6 的 PHP 下限即 8.2） |
 | ext-swoole | ^6.0（协程 Http Server + 连接池） |
 | yiisoft/yii2 | ^2.0 |
+| ext-redis | 原生 phpredis，使用 `redis`/`cache`/`session`/`queue` 组件时必需（`yii2-redis` 是纯 PHP 客户端，不提供 `\Redis`） |
 | MySQL / Redis | 可选，按使用的组件而定 |
 
 > **目标平台是 Linux**（生产环境）；macOS 可开发（pecl 编译安装即可）。
@@ -155,7 +156,7 @@ php yii swoole/start [--host=] [--port=] [--watch]  # 启动（阻塞），写 p
 php yii swoole/status                               # 查看运行状态
 php yii swoole/stop                                 # 优雅停机（在途请求排空后退出）
 php yii swoole/reload                               # 停机 + 尽力重新拉起（生产建议交给 supervisor）
-php yii swoole/check                                # 配置体检（db/redis 探活、关键配置校验）
+php yii swoole/check                                # 配置体检（Application 隔离、cookie key、prettyUrl、db/redis 探活）
 php yii queue/serve [--limit=N]                     # 队列消费 worker（无限轮询）
 ```
 
@@ -175,18 +176,36 @@ php yii swoole/start --watch
 
 ## 生产部署（Linux）
 
-标准架构：**nginx 直接服务静态文件 + TLS，Swoole 只处理动态请求**；
-多实例利用多核（`SO_REUSEPORT` 已启用，内核做负载均衡）：
+标准架构：**nginx 直接服务静态文件 + TLS，Swoole 只处理动态请求**。
+
+多核部署用 **多端口 + nginx upstream**（每个实例一个端口，各自独立的 pid 文件）：
 
 ```ini
-# supervisor: numprocs=4, 4 实例共享 9501 端口
-command=swoole-cli /app/yii swoole/start --host=127.0.0.1 --port=9501
+; supervisor: 4 个实例分别监听 9501-9504
+[program:yii2s]
+command=swoole-cli /app/yii swoole/start --host=127.0.0.1 --port=950%(process_num)02d
+process_name=%(program_name)s_%(process_num)02d
 numprocs=4
 autorestart=true
 stopsignal=TERM
+stopwaitsecs=25                ; 必须大于 gracefulTimeout(10s)，留出排空时间
 ```
 
-nginx 配置、`X-Forwarded-*` 说明见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md) 部署章节。
+> 同端口多实例（`SO_REUSEPORT`，已在 server factory 中启用）**可用**，但每个实例
+> 必须有独立的 pid 文件，否则第二个进程会被 `swoole/start` 的防重复启动守卫拒绝。
+> 示例配置已支持 `SWOOLE_PID_FILE`：
+>
+> ```ini
+> command=swoole-cli /app/yii swoole/start --host=127.0.0.1 --port=9501
+> environment=SWOOLE_PID_FILE="/app/runtime/swoole-%(process_num)02d.pid"
+> numprocs=4
+> ```
+>
+> `swoole/stop`/`status`/`reload` 是按单个 pid 文件操作的，这种模式由 supervisor
+> 负责生命周期；想直接用控制台命令管多个实例，用上面的多端口 + upstream。
+
+nginx upstream、真实客户端 IP（`trustedProxies`）、超时、上传大小等生产清单见
+[`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md) 部署章节。
 
 ## 调试
 
@@ -201,17 +220,19 @@ swoole-cli scripts/bench.php --path=/demo/db --concurrency=100 --duration=5
 ## 架构一览
 
 ```
-请求 → Swoole 协程 Http\Server（单进程多协程，SO_REUSEPORT 多实例）
+请求 → Swoole 协程 Http\Server（单进程多协程；多实例 = 多端口 + nginx upstream）
      → RequestDispatcher（静态文件 / /__pool / Yii2）
-     → 常驻 Yii2 Application（进程内只创建一次）
-        ├─ request/response/session/user：每请求重建（无跨请求状态）
+     → 常驻 Yii2 Application（进程内只创建一次，CoroutineApplication）
+        ├─ request/response/session/user：每协程独立实例（并发请求互不可见）
         ├─ db/redis：连接池 borrow/return（协程粘性，协程结束自动 sweep 回收）
         └─ 结束时：RequestStateManager 统一 release + 池 sweep + 日志 flush
 ```
 
 设计原则：**状态隔离做在调度层，上层 Yii2 组件尽量不改**——这也是 CSRF、Basic Auth、
-事务、MULTI 无需适配就能用的原因。完整设计思路与踩坑记录见
-[`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md)。
+事务、MULTI 无需适配就能用的原因。
+
+完整的**接入 → 启动 → 单请求 → 停机**流程图、组件替换对照表和生产拓扑见
+[`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md) 第 3.1.1 节；设计思路与踩坑记录在同文档其余章节。
 
 ## 已知限制
 
@@ -220,21 +241,55 @@ swoole-cli scripts/bench.php --path=/demo/db --concurrency=100 --duration=5
   （`documentRoot`，开发用）或交给 nginx（生产推荐）
 - 不要在常驻进程中使用 `$_SESSION`/`header()`/`setcookie()` 等超全局/过程式 API，
   一律走 `Yii::$app->request/response/session`
+- 自定义 `Application` 类必须继承 `Yii2S\Swoole\Runtime\CoroutineApplication`，否则
+  request/response/session/user 会在并发请求间共享（默认 `yii\web\Application` 由
+  调度器自动换成该子类，无需改动）
+- 子协程（`Coroutine::create()`）**不继承**协程上下文：在子协程里访问
+  `Yii::$app->request/session/user` 会得到该请求之外的空实例。并发子任务请先在
+  父协程取出所需数据再传入（DB/Redis 连接池本身不受影响）
+- 上传有两种写法，按是否需要落盘选择：
+  - `yii\web\UploadedFile`（官方 API）能读，但它的 `saveAs()` 用 `move_uploaded_file()`，
+    Swoole 自己写的临时文件不在 PHP 的上传登记表里，**默认参数下必然返回 false**；
+    而且它读进程级 `$_FILES`，并发请求下可能串文件。
+  - 要保存文件请用 `Yii2S\Swoole\Runtime\CoroutineUploadedFile`（API 完全一致：
+    `getInstance()/getInstances()/getInstanceByName()/saveAs()`），它从当前协程的
+    请求取文件，不碰 `$_FILES`：
+
+    ```php
+    use Yii2S\Swoole\Runtime\CoroutineUploadedFile as UploadedFile;
+
+    $file = UploadedFile::getInstance($model, 'avatar');
+    if ($file !== null && $file->saveAs('@app/web/uploads/' . $file->name)) {
+        // 已落盘，临时文件同时被移走
+    }
+    ```
+
+    仍然建议在动作入口、任何协程让出之前取走 `UploadedFile`（协程版本已无全局状态，
+    这条只是让数据更早绑定到当前请求）。
 
 ## 开发与测试
 
-目标平台 Linux；一切测试验证在 WSL Ubuntu（或任意 Linux）内完成，
-两条运行时线各 87 tests / 378 assertions 全绿（swoole-cli 6.2.2 与标准
-pecl 构建 PHP 8.5 + swoole 6.2.4，即 CI 同源）：
+目标平台 Linux；测试可在 Linux/WSL2 与 macOS（swoole-cli）上完整运行，
+全量 164 tests / 713 assertions（2 skipped）全绿（macOS + swoole-cli 6.2.0 /
+PHP 8.4 实测；CI 同源的 pecl 构建跑同一套用例）。
+其中 `tests/compat/` 是按功能点组织的迁移兼容性套件（路由、请求、响应格式、
+Cookie、CSRF、会话、登录、Flash、上传、下载、错误处理、常驻服务、并发隔离），
+可按域单独运行：`swoole-cli vendor/bin/phpunit --no-coverage tests/compat`。
 
 ```bash
 composer test    # PHPUnit（需要本地 MySQL/Redis）
 composer static  # PHPStan level 5
 composer cs      # php-cs-fixer（与官方 yii2 同规则）
 
-# 端到端（start/status/reload 真实 respawn/SIGTERM）与基准：
+# 进程级端到端（start/status/reload 真实 respawn/SIGTERM）与基准：
+# 两个脚本都支持 macOS/Linux，可用 CLI/PORT/APP_DIR/CONCURRENCY/DURATION 覆盖
 bash scripts/wsl-e2e.sh
-bash scripts/wsl-bench.sh   # 基准: 13706 QPS（纯框架）零错误
+bash scripts/wsl-bench.sh   # 本机基线见下方说明
+
+# macOS + swoole-cli 6.2.0 / PHP 8.4，50 并发 3s，0 错误、池零超时：
+#   /            8148 QPS (p50 4.2ms)
+#   /demo/db     3330 QPS (p50 10.0ms)
+#   /demo/redis  3616 QPS (p50 9.0ms)
 ```
 
 标准 pecl 构建的安装与复现步骤见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md) 验证状态一节。

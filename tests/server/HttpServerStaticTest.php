@@ -123,6 +123,13 @@ class HttpServerStaticTest extends TestCase
 
                     $env = $this->request($port, '/.env');
                     $this->assertSame(404, $env['status'], 'hidden files must never be served as a static file');
+
+                    // An encoded null byte must be rejected *after* decoding,
+                    // before it reaches realpath() (which throws a ValueError
+                    // on null bytes - an uncaught exception in the request
+                    // coroutine takes the worker down).
+                    $nullByte = $this->request($port, '/css/app.css%00.png');
+                    $this->assertSame(404, $nullByte['status'], 'encoded null bytes must not reach the filesystem');
                 } finally {
                     $server->stop();
                     $this->waitFor(fn (): bool => !$server->isRunning());

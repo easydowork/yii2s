@@ -1,5 +1,11 @@
 <?php
 
+/**
+ * @link https://github.com/yii2s/yii2-swoole
+ * @copyright Copyright (c) 2026 Yii2S Software LLC
+ * @license MIT
+ */
+
 declare(strict_types=1);
 
 namespace yii2stest\framework;

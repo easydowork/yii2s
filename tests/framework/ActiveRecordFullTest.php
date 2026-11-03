@@ -1,5 +1,11 @@
 <?php
 
+/**
+ * @link https://github.com/yii2s/yii2-swoole
+ * @copyright Copyright (c) 2026 Yii2S Software LLC
+ * @license MIT
+ */
+
 declare(strict_types=1);
 
 namespace yii2stest\framework;
@@ -78,7 +84,7 @@ class ActiveRecordFullTest extends DatabaseTestCase
             $post->author_id = 1;
             $post->version = 1;   // explicit: DB default fills the column but not the AR state
             $this->assertTrue($post->insert());
-            $this->assertNotNull($post->id);
+            $this->assertGreaterThan(0, $post->id, "auto-increment id assigned");
 
             $post->title = "explicit update";
             $this->assertSame(1, $post->update(), "one row affected");
@@ -137,8 +143,8 @@ class ActiveRecordFullTest extends DatabaseTestCase
                 ->asArray()
                 ->orderBy(["id" => SORT_ASC])
                 ->all();
-            $this->assertIsArray($rows);
-            $this->assertIsNotObject($rows[0]);
+            $this->assertNotEmpty($rows);
+            $this->assertArrayHasKey("title", $rows[0]);
             $this->assertSame("First framework post", $rows[0]["title"]);
 
             $indexed = \yii2stest\framework\models\FwPost::find()

@@ -31,15 +31,31 @@ final class PidFile
     /**
      * Writes the given data as JSON to the pid file.
      *
+     * The file is written with owner-only permissions and through no symlink:
+     * the default location is inside the (sticky, shared) system temp
+     * directory, where another local user could otherwise pre-create a
+     * symlink and have the server overwrite an arbitrary file it can write.
+     *
      * @param array<string, mixed> $data
+     * @throws \RuntimeException when the path is a symlink
      */
     public function write(array $data): void
     {
         $directory = dirname($this->path);
         if (!is_dir($directory)) {
-            @mkdir($directory, 0777, true);
+            @mkdir($directory, 0755, true);
         }
-        file_put_contents($this->path, json_encode($data, JSON_UNESCAPED_SLASHES));
+
+        clearstatcache(true, $this->path);
+        if (is_link($this->path)) {
+            throw new \RuntimeException(sprintf(
+                'Refusing to write pid file "%s": it is a symlink. Remove it (or configure another pidFile) and retry.',
+                $this->path
+            ));
+        }
+
+        file_put_contents($this->path, json_encode($data, JSON_UNESCAPED_SLASHES), LOCK_EX);
+        @chmod($this->path, 0600);
     }
 
     /**

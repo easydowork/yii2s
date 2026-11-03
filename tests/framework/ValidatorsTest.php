@@ -1,10 +1,15 @@
 <?php
 
+/**
+ * @link https://github.com/yii2s/yii2-swoole
+ * @copyright Copyright (c) 2026 Yii2S Software LLC
+ * @license MIT
+ */
+
 declare(strict_types=1);
 
 namespace yii2stest\framework;
 
-use Yii;
 use yii\base\DynamicModel;
 use yii2stest\DatabaseTestCase;
 
@@ -86,8 +91,9 @@ class ValidatorsTest extends DatabaseTestCase
                 ["code", "default", "value" => "AUTO"],
             ], ["name" => "  spaced  "]);
             $this->assertFalse($m->hasErrors());
-            $this->assertSame("spaced", $m->name, "trim filter applied");
-            $this->assertSame("AUTO", $m->code, "default applied for missing attribute");
+            $attributes = $m->getAttributes();
+            $this->assertSame("spaced", $attributes["name"], "trim filter applied");
+            $this->assertSame("AUTO", $attributes["code"], "default applied for missing attribute");
         });
     }
 
@@ -134,6 +140,9 @@ class ValidatorsTest extends DatabaseTestCase
                         "SELECT COUNT(*) FROM {{%fw_post}}"
                     )->queryScalar();
                     if ((int) $this->$attribute > 100) {
+                        // $this is bound to the DynamicModel by InlineValidator,
+                        // which static analysis cannot see.
+                        // @phpstan-ignore method.notFound
                         $this->addError($attribute, "value too high (posts: $total)");
                     }
                 }],

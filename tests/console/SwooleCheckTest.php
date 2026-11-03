@@ -41,12 +41,16 @@ class SwooleCheckTest extends TestCase
         parent::tearDown();
     }
 
-    private function buildController(array $webComponents): SwooleController
+    private function buildController(array $webComponents, ?string $appClass = null): SwooleController
     {
-        file_put_contents($this->configFile, '<?php return ' . var_export([
+        $config = [
             'id' => 'yii2stest-check',
             'components' => $webComponents,
-        ], true) . ';');
+        ];
+        if ($appClass !== null) {
+            $config['class'] = $appClass;
+        }
+        file_put_contents($this->configFile, '<?php return ' . var_export($config, true) . ';');
 
         new ConsoleApplication([
             'id' => 'yii2stest-check',
@@ -117,6 +121,24 @@ class SwooleCheckTest extends TestCase
         $this->assertNotSame(0, $exit, 'missing cookieValidationKey must be reported');
     }
 
+    public function testCheckFailsForApplicationClassWithoutCoroutineIsolation(): void
+    {
+        $controller = $this->buildController($this->healthyComponents(), LegacyApplication::class);
+        $exit = $controller->actionCheck();
+        $this->assertNotSame(
+            0,
+            $exit,
+            'a custom Application that does not extend CoroutineApplication leaks request state between concurrent requests'
+        );
+    }
+
+    public function testCheckPassesForCoroutineApplicationSubclass(): void
+    {
+        $controller = $this->buildController($this->healthyComponents(), \Yii2S\Swoole\Runtime\CoroutineApplication::class);
+        $exit = $controller->actionCheck();
+        $this->assertSame(0, $exit, 'CoroutineApplication subclasses are isolated and must pass');
+    }
+
     public function testCheckSkipsMissingComponents(): void
     {
         $controller = $this->buildController([
@@ -145,4 +167,13 @@ class SwooleCheckTest extends TestCase
         $exit = $controller->actionCheck();
         $this->assertNotSame(0, $exit, 'a missing app config file must fail the check');
     }
+}
+
+/**
+ * A legacy custom application class: it extends the stock web application but
+ * not [[\Yii2S\Swoole\Runtime\CoroutineApplication]], so request-scoped
+ * components would be shared between concurrent requests.
+ */
+class LegacyApplication extends \yii\web\Application
+{
 }

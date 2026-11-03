@@ -1,9 +1,19 @@
 <?php
 
+/**
+ * @link https://github.com/yii2s/yii2-swoole
+ * @copyright Copyright (c) 2026 Yii2S Software LLC
+ * @license MIT
+ */
+
 namespace yii2stest\framework\models;
 
 use yii\db\ActiveRecord;
 
+/**
+ * @property int $post_id
+ * @property int $tag_id
+ */
 class FwPostTag extends ActiveRecord
 {
     public static function getDb(): \Yii2S\Swoole\Db\CoroutineDbConnection

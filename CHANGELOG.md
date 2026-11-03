@@ -7,6 +7,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Per-coroutine request-scoped components (critical)**: concurrent requests
+  used to share the same `request` / `response` / `session` / `user`
+  instances, so one request could read another request's parameters, session
+  or identity. The dispatcher now instantiates the resident application as
+  `Runtime\CoroutineApplication`, which resolves those four ids from the
+  coroutine context (one instance per request). Custom application classes
+  must extend it; the default `yii\web\Application` is swapped automatically.
+- **Login over HTTP**: `Session::getHasSessionId()` read the process-global
+  `$_COOKIE` (never populated by Swoole), so every request after `login()`
+  was treated as a guest. It now reads the coroutine request cookies.
+- **Flash messages**: the whole flash API wrote to `$_SESSION`; reimplemented
+  on the coroutine-local payload with the official counter semantics.
+- **`RegenerateID()` data loss**: regenerating before the session was opened
+  persisted an empty payload, wiping pre-login data (cart, returnUrl).
+- **`Response::sendFile()`**: streamed responses produced headers without a
+  body; `SwooleResponseSender` now writes the byte range (206/416 support).
+- **Upload saving**: `yii\web\UploadedFile::saveAs()` (with the default
+  `$deleteTempFile = true`) always returned false under Swoole, because
+  `move_uploaded_file()` does not accept temp files written by Swoole itself.
+- **One-line integration on the very first request**:
+  `yii\web\Application::bootstrap()` resolves `request` before the component
+  replacement runs, so the first request after a restart used the stock
+  request (failing with "Unable to determine the request URI") and
+  `@webroot`/`@web` were derived from the console entry script. The cached
+  stock instance is now discarded and both aliases are re-derived.
+- **Error pages**: exceptions bypassed Yii's error handler, so
+  `errorHandler.errorAction` (e.g. `site/error`) and custom error views never
+  rendered - only the dispatcher's plain-text fallback. Exceptions now render
+  through the configured error action (HTML, or JSON for AJAX requests).
+- **Response framing**: in-memory bodies are now sent with
+  `Response::end($content)` (Content-Length) instead of `write()` + `end()`
+  (chunked). HTTP/1.0 keep-alive clients (e.g. `ab -k`) no longer stall after
+  the first response, and chunked framing overhead is gone.
+- **Static files**: an encoded null byte (`%00`) reached `realpath()` and
+  threw an uncaught `ValueError` inside the request coroutine (remote DoS).
+- **Session fixation**: `useStrictMode` was silently ignored; unknown
+  client-supplied session ids are now regenerated.
+- **Cookie parsing**: `unserialize()` uses `allowed_classes => false`,
+  matching stock `yii\web\Request`.
+- **pid file**: per-user temp directory, symlink refusal, 0600 permissions.
+- **SIGTERM** now drains in-flight requests (dedicated shutdown coroutine).
+- **Unhandled request exceptions** are logged instead of only returned.
+
+### Changed
+
+- **Production deployment docs corrected**: same-port multi-instance works
+  only with a per-instance pid file (the default is keyed by host-port, so the
+  start guard rejects the second process). The example config now reads
+  `SWOOLE_PID_FILE`, `scripts/wsl-e2e.sh` starts two instances on one port and
+  asserts both serve, and the docs present both recipes (multi-port + nginx
+  upstream as the default, same-port `SO_REUSEPORT` with supervisor-owned
+  pid files). Also added the `stopwaitsecs > gracefulTimeout`,
+  `client_max_body_size` / `package_max_length`, pool-sizing and health-check
+  notes.
+- **`scripts/wsl-e2e.sh` / `scripts/wsl-bench.sh` are portable**: `CLI`,
+  `PORT`, `APP_DIR`, `CONCURRENCY`, `DURATION` are configurable and both run on
+  macOS and Linux instead of a hardcoded WSL path.
+
+### Added
+
+- **`examples/blog`**: cover uploads (CoroutineUploadedFile), comments with
+  moderation, Redis view counter, cached front page with version invalidation,
+  queue worker + audit log, CSV export through `sendFile()`, API-key
+  authenticated REST API, and `scripts/smoke.sh` (52 end-to-end checks).
+- **Real client IP behind a reverse proxy**: `CoroutineRequest::$trustedProxies`
+  accepts IPs/CIDR blocks; when the direct peer is trusted, `getUserIP()`
+  resolves the right-most untrusted `X-Forwarded-For` hop. Empty by default, so
+  forwarding headers stay untrusted (stock Yii behaviour).
+- **`Runtime\CoroutineUploadedFile`**: coroutine-local replacement for
+  `yii\web\UploadedFile`. It reads the file table of the current request
+  instead of the global `$_FILES` (no cross-request mixups) and saves via
+  rename/copy instead of `move_uploaded_file()`.
+- **`tests/compat/`**: end-to-end Yii2 feature-compatibility suite (routing,
+  request inputs, response formats, cookies, CSRF, session, auth, flash,
+  uploads, downloads, error handling, resident services, concurrency
+  isolation) driven through a real Swoole server; the feature matrix lives in
+  `doc/DEVELOPMENT.md` 5.4.
+
 ### Added
 
 - **`examples/blog/`**: a complete real-world scenario — classic MVC front

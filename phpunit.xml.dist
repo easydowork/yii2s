@@ -17,6 +17,7 @@
         <testsuite name="Yii2S Swoole Test Suite">
             <directory>./tests/pools</directory>
             <directory>./tests/db</directory>
+            <directory>./tests/framework</directory>
             <directory>./tests/redis</directory>
             <directory>./tests/cache</directory>
             <directory>./tests/session</directory>
@@ -26,6 +27,7 @@
             <directory>./tests/server</directory>
             <directory>./tests/console</directory>
             <directory>./tests/web</directory>
+            <directory>./tests/compat</directory>
             </testsuite>
     </testsuites>
 

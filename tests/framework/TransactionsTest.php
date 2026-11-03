@@ -1,10 +1,15 @@
 <?php
 
+/**
+ * @link https://github.com/yii2s/yii2-swoole
+ * @copyright Copyright (c) 2026 Yii2S Software LLC
+ * @license MIT
+ */
+
 declare(strict_types=1);
 
 namespace yii2stest\framework;
 
-use Yii;
 use yii\db\Transaction;
 use yii2stest\DatabaseTestCase;
 
@@ -60,7 +65,7 @@ class TransactionsTest extends DatabaseTestCase
                 Transaction::SERIALIZABLE,
             ] as $level) {
                 $tx = $db->beginTransaction($level);
-                $this->assertNotNull($tx, "transaction started at level $level");
+                $this->assertNotNull($db->getTransaction(), "transaction started at level $level");
                 $tx->commit();
             }
         });
@@ -111,7 +116,7 @@ class TransactionsTest extends DatabaseTestCase
     {
         $db = $this->getConnection();
         $this->runInCoroutine(function () use ($db): void {
-            $result = $db->transaction(function () use ($db): string {
+            $result = $db->transaction(function (): string {
                 $this->insertPost('Closure ok', 'closure-ok');
 
                 return 'done';
@@ -127,7 +132,7 @@ class TransactionsTest extends DatabaseTestCase
         $db = $this->getConnection();
         $this->runInCoroutine(function () use ($db): void {
             try {
-                $db->transaction(function () use ($db): void {
+                $db->transaction(function (): void {
                     $this->insertPost('Closure fail', 'closure-fail');
                     throw new \RuntimeException('rollback me');
                 });
@@ -148,7 +153,7 @@ class TransactionsTest extends DatabaseTestCase
                 $this->insertPost('Nested outer row', 'nested-outer');
 
                 try {
-                    $db->transaction(function () use ($db): void {
+                    $db->transaction(function (): void {
                         $this->insertPost('Nested inner row', 'nested-inner');
                         throw new \RuntimeException('inner failure');
                     });
@@ -178,7 +183,6 @@ class TransactionsTest extends DatabaseTestCase
             $post->author_id = 1;
             $this->assertTrue($post->save());
             $savedId = $post->id;
-            fwrite(STDERR, "DIAG txdb=" . spl_object_id($db) . " ardb=" . spl_object_id($post->getDb()) . " fwdb=" . spl_object_id(FwDb::$connection) . PHP_EOL);
 
             $tx->rollBack();
 

@@ -44,7 +44,8 @@ class HttpServer extends Component
     /** @var bool whether SIGINT/SIGTERM trigger a graceful shutdown */
     public bool $enableSignalHandling = true;
 
-    /** @var string|null pid file path; null resolves to the system temp directory */
+    /** @var string|null pid file path; null resolves to a per-user directory
+     *  inside the system temp directory (see [[getPidFile()]]) */
     public $pidFile = null;
 
     /** @var string|null stop flag file path; null resolves next to the pid file */
@@ -100,6 +101,10 @@ class HttpServer extends Component
     /** @var bool whether stop() has been called; lets the watcher coroutine
      *  exit so that Coroutine\run() is not kept alive by it */
     private bool $stopRequested = false;
+
+    /** @var bool set by the signal handlers (which must not block) and
+     *  consumed by the shutdown dispatcher coroutine */
+    private bool $shutdownRequested = false;
 
     public function init(): void
     {
@@ -159,12 +164,28 @@ class HttpServer extends Component
     public function getPidFile(): PidFile
     {
         if ($this->pidFileManager === null) {
+            // Default: a per-user directory inside the system temp dir. A
+            // predictable file directly in /tmp could be pre-created (or
+            // symlinked) by another local user; a directory we own prevents
+            // both, without requiring a writable @app/runtime from console.
             $path = $this->pidFile
-                ?? sys_get_temp_dir() . DIRECTORY_SEPARATOR . sprintf('yii2s-swoole-%s-%d.pid', $this->host, $this->port);
+                ?? sys_get_temp_dir() . DIRECTORY_SEPARATOR
+                    . sprintf('yii2s-swoole-%d', $this->effectiveUid())
+                    . DIRECTORY_SEPARATOR
+                    . sprintf('%s-%d.pid', $this->host, $this->port);
             $this->pidFileManager = new PidFile($path);
         }
 
         return $this->pidFileManager;
+    }
+
+    /**
+     * Effective user id for the default pid file directory; 0 on platforms
+     * without posix (Windows is not a supported target, but do not break).
+     */
+    private function effectiveUid(): int
+    {
+        return function_exists('posix_geteuid') ? (int) posix_geteuid() : 0;
     }
 
     public function getStopFlagFile(): PidFile
@@ -212,6 +233,7 @@ class HttpServer extends Component
 
         $this->lastStopAction = null;
         $this->stopRequested = false;
+        $this->shutdownRequested = false;
         $this->writePidFile();
         $this->isRunning = true;
 
@@ -255,7 +277,7 @@ class HttpServer extends Component
         $server = $this->server;
 
         if ($this->enableSignalHandling) {
-            $this->registerSignalHandlers($server);
+            $this->registerSignalHandlers();
         }
         if ($this->enableStopFlagWatcher) {
             $this->startStopFlagWatcher();
@@ -276,7 +298,8 @@ class HttpServer extends Component
 
     public function stop(): void
     {
-        if (!$this->isRunning || $this->server === null) {
+        // Idempotent: a signal and the stop-flag watcher may both fire.
+        if (!$this->isRunning || $this->server === null || $this->stopRequested) {
             return;
         }
         $this->stopRequested = true;
@@ -329,19 +352,40 @@ class HttpServer extends Component
         $this->server->set($this->settings);
     }
 
-    private function registerSignalHandlers(SwooleCoroutineHttpServer $server): void
+    private function registerSignalHandlers(): void
     {
         try {
             foreach ([SIGINT, SIGTERM] as $signal) {
-                Process::signal($signal, function () use ($server): void {
-                    $server->shutdown();
+                Process::signal($signal, function (): void {
+                    // Signal callbacks run in the event loop, outside any
+                    // coroutine; shutdown() blocks. Only raise a flag here and
+                    // let a coroutine run the graceful stop, so supervisor's
+                    // TERM drains in-flight requests instead of killing them.
+                    $this->shutdownRequested = true;
                 });
             }
+            $this->startShutdownDispatcher();
         } catch (\Throwable $e) {
             // Signal handling may be unavailable (pcntl missing); the server
             // still works, it just cannot shut down gracefully. The stop flag
             // watcher provides the graceful path in that case.
         }
+    }
+
+    /**
+     * Turns the signal flag into a graceful [[stop()]] from a real coroutine.
+     */
+    private function startShutdownDispatcher(): void
+    {
+        Coroutine::create(function (): void {
+            while ($this->isRunning && !$this->stopRequested) {
+                if ($this->shutdownRequested) {
+                    $this->stop();
+                    return;
+                }
+                Coroutine::sleep(0.1);
+            }
+        });
     }
 
     /**

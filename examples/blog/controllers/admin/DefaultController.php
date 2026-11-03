@@ -4,10 +4,21 @@ namespace app\controllers\admin;
 
 use app\models\LoginForm;
 use Yii;
+use yii\filters\VerbFilter;
 use yii\web\Controller;
 
 class DefaultController extends Controller
 {
+    public function behaviors(): array
+    {
+        return [
+            'verbs' => [
+                'class' => VerbFilter::class,
+                'actions' => ['logout' => ['POST']],
+            ],
+        ];
+    }
+
     public function actionLogin()
     {
         if (!Yii::$app->user->getIsGuest()) {
@@ -27,5 +38,19 @@ class DefaultController extends Controller
         Yii::$app->user->logout();
 
         return $this->redirect(['/site/index']);
+    }
+
+    /**
+     * JSON probe used by the smoke test to check identity restoration with
+     * normal session cookies, remember-me cookies, and tampered cookies.
+     */
+    public function actionWhoami(): array
+    {
+        Yii::$app->response->format = \yii\web\Response::FORMAT_JSON;
+
+        return [
+            'guest' => Yii::$app->user->getIsGuest(),
+            'id' => Yii::$app->user->getId(),
+        ];
     }
 }

@@ -1,0 +1,6 @@
+/vendor/
+/runtime/
+/web/assets/*
+!/web/assets/.gitkeep
+/web/uploads/*
+!/web/uploads/.gitkeep

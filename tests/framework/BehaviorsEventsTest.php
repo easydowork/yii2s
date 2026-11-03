@@ -1,10 +1,15 @@
 <?php
 
+/**
+ * @link https://github.com/yii2s/yii2-swoole
+ * @copyright Copyright (c) 2026 Yii2S Software LLC
+ * @license MIT
+ */
+
 declare(strict_types=1);
 
 namespace yii2stest\framework;
 
-use Yii;
 use Yii2S\Swoole\Db\CoroutineDbConnection;
 use yii\db\ActiveRecord;
 use yii2stest\TestCase;
@@ -45,7 +50,10 @@ class BehaviorsEventsTest extends TestCase
     protected function tearDown(): void
     {
         foreach (['fw_comment', 'fw_post_tag', 'fw_tag', 'fw_post', 'fw_user'] as $t) {
-            try { $this->db?->createCommand("DROP TABLE IF EXISTS $t")->execute(); } catch (\Throwable) {}
+            try {
+                $this->db?->createCommand("DROP TABLE IF EXISTS $t")->execute();
+            } catch (\Throwable) {
+            }
         }
         $this->db?->close();
         $this->db = null;
@@ -56,6 +64,8 @@ class BehaviorsEventsTest extends TestCase
     public function testTimestampAndSluggable(): void
     {
         $this->markTestSkipped("SluggableBehavior slug generation under coroutine context requires investigation");
+        // Kept as documentation of the pending investigation.
+        // @phpstan-ignore deadCode.unreachable
         $this->runInCoroutine(function (): void {
             $post = new \yii2stest\framework\models\FwPost();
             $post->title = "ts-test";
@@ -75,10 +85,18 @@ class BehaviorsEventsTest extends TestCase
             $post->content = "x";
             $post->author_id = 1;
             $log = [];
-            $post->on(ActiveRecord::EVENT_BEFORE_INSERT, function () use (&$log) { $log[] = "beforeInsert"; });
-            $post->on(ActiveRecord::EVENT_AFTER_INSERT, function () use (&$log) { $log[] = "afterInsert"; });
-            $post->on(ActiveRecord::EVENT_BEFORE_DELETE, function () use (&$log) { $log[] = "beforeDelete"; });
-            $post->on(ActiveRecord::EVENT_AFTER_DELETE, function () use (&$log) { $log[] = "afterDelete"; });
+            $post->on(ActiveRecord::EVENT_BEFORE_INSERT, function () use (&$log) {
+                $log[] = "beforeInsert";
+            });
+            $post->on(ActiveRecord::EVENT_AFTER_INSERT, function () use (&$log) {
+                $log[] = "afterInsert";
+            });
+            $post->on(ActiveRecord::EVENT_BEFORE_DELETE, function () use (&$log) {
+                $log[] = "beforeDelete";
+            });
+            $post->on(ActiveRecord::EVENT_AFTER_DELETE, function () use (&$log) {
+                $log[] = "afterDelete";
+            });
             $post->save(false);
             $this->assertContains("beforeInsert", $log);
             $this->assertContains("afterInsert", $log);
@@ -99,7 +117,9 @@ class BehaviorsEventsTest extends TestCase
             $post->created_at = time();
             $post->updated_at = time();
             $post->slug = "dyn";
-            $post->on(ActiveRecord::EVENT_BEFORE_INSERT, function ($event) { $event->sender->views = 777; });
+            $post->on(ActiveRecord::EVENT_BEFORE_INSERT, function ($event) {
+                $event->sender->views = 777;
+            });
             $post->save(false);
             $this->assertSame(777, $post->views);
             $post2 = new \yii2stest\framework\models\FwPost();
@@ -114,6 +134,8 @@ class BehaviorsEventsTest extends TestCase
     public function testSluggableGeneratesUniqueSlug(): void
     {
         $this->markTestSkipped("SluggableBehavior slug generation under coroutine context requires investigation - see pitfall log");
+        // Kept as documentation of the pending investigation.
+        // @phpstan-ignore deadCode.unreachable
         $this->runInCoroutine(function (): void {
             $a = new \yii2stest\framework\models\FwPost();
             $a->title = "Sluggable Test Post";

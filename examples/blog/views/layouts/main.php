@@ -18,7 +18,8 @@
         label { display: block; margin-top: .8rem; }
         input[type=text], textarea { width: 100%; padding: .4rem; }
         .btn { padding: .4rem .9rem; margin-top: .8rem; }
-        .flash { background: #e6ffe6; padding: .5rem; }
+        .flash { background: #e6ffe6; padding: .5rem; margin: .5rem 0; }
+        .flash-error { background: #ffecec; }
     </style>
 </head>
 <body>
@@ -30,13 +31,14 @@
         <?= Html::a('Login', ['/admin/default/login']) ?>
     <?php else: ?>
         <?= Html::a('Admin', ['/admin/post/index']) ?>
+        <?= Html::a('Comments', ['/admin/comment/index']) ?>
         <?= Html::a('Logout (' . Html::encode(Yii::$app->user->getIdentity()->username) . ')', ['/admin/default/logout'], ['data-method' => 'post']) ?>
     <?php endif; ?>
 </nav>
 <hr>
-<?php if (Yii::$app->session->hasFlash('success')): ?>
-    <div class="flash"><?= Html::encode(Yii::$app->session->getFlash('success')) ?></div>
-<?php endif; ?>
+<?php foreach (Yii::$app->session->getAllFlashes() as $type => $message): ?>
+    <div class="flash flash-<?= Html::encode((string) $type) ?>"><?= Html::encode(is_array($message) ? implode(' ', $message) : (string) $message) ?></div>
+<?php endforeach; ?>
 <?= $content ?>
 <?php $this->endBody() ?>
 </body>

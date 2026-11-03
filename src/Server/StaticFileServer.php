@@ -101,16 +101,32 @@ class StaticFileServer
             return false;
         }
 
-        // Strip the query string and decode URL escapes.
+        // Strip the query string and decode URL escapes. Decoding must happen
+        // *before* validation: an encoded null byte (`%00`) or encoded
+        // separators (`%2e%2e%2f`) would otherwise pass the checks below and
+        // reach realpath(), which throws a ValueError on null bytes - an
+        // uncaught exception here kills the request coroutine (DoS).
         $path = parse_url($uri, PHP_URL_PATH);
-        if (!is_string($path) || $path === '' || str_contains($path, "\0")) {
+        if (!is_string($path) || $path === '') {
             return false;
         }
         $path = urldecode($path);
 
+        // Reject null bytes (path truncation) and backslashes (Windows-style
+        // separators that pathinfo()/realpath() treat inconsistently).
+        if (!str_starts_with($path, '/') || str_contains($path, "\0") || str_contains($path, '\\')) {
+            return false;
+        }
+
         // Only serve paths that look like asset files (with an extension).
         $extension = strtolower(pathinfo($path, PATHINFO_EXTENSION));
         if ($extension === '') {
+            return false;
+        }
+
+        // Reject any `..` path segment outright (defense in depth; the
+        // realpath prefix check below is the authoritative guard).
+        if (preg_match('#(^|/)\.\.(/|$)#', $path) === 1) {
             return false;
         }
 

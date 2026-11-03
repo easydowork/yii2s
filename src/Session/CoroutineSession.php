@@ -38,6 +38,8 @@ class CoroutineSession extends Session
 
     private bool $idFromClient = false;
 
+    private bool $useStrictMode = true;
+
     private int $timeoutSeconds = 1440;
 
     public function init(): void
@@ -65,14 +67,22 @@ class CoroutineSession extends Session
     }
 
     /**
-     * Strict mode has no meaning without the native session machinery: the
-     * session id always comes from the client cookie or a freshly generated
-     * random value, never from an uninitialized store. Overridden purely to
-     * avoid the parent's ini write.
+     * Strict session mode (Yii2 default: enabled): a session id supplied by
+     * the client is only accepted when the corresponding session already
+     * exists. Without this an attacker can plant a known id (session
+     * fixation) and take over the session once the victim logs in.
+     *
+     * Overridden to store the value locally instead of writing the
+     * `session.use_strict_mode` ini setting, which has no effect here.
      */
     public function setUseStrictMode($value): void
     {
-        // accepted for configuration compatibility; intentionally ignored
+        $this->useStrictMode = (bool) $value;
+    }
+
+    public function getUseStrictMode(): bool
+    {
+        return $this->useStrictMode;
     }
 
     /**
@@ -90,22 +100,10 @@ class CoroutineSession extends Session
             return;
         }
 
-        // An explicitly assigned id (setId()) wins over the client cookie,
-        // matching yii\web\Session semantics (session_id($this->getId())).
-        // Cookie-based resolution only runs when no id was assigned.
-        if ($this->sessionId === null) {
-            $this->sessionId = $this->resolveSessionId();
-        }
+        $fromClientCookie = $this->resolveId();
         $this->opened = true;
-
-        $raw = $this->redis->executeCommand('GET', [$this->storageKey()]);
-        if (is_string($raw) && $raw !== '') {
-            $decoded = @unserialize($raw);
-            $this->data = is_array($decoded) ? $decoded : [];
-        } else {
-            $this->data = [];
-        }
-
+        $this->loadData($fromClientCookie);
+        $this->updateFlashCounters();
         $this->touch();
         $this->sendSessionCookie();
     }
@@ -131,6 +129,14 @@ class CoroutineSession extends Session
 
     public function regenerateID($deleteOldSession = true): void
     {
+        if (!$this->opened) {
+            // Native session_regenerate_id() keeps the payload. Load it before
+            // switching ids so data written earlier in the request (cart,
+            // returnUrl, flash) survives a login-triggered regeneration.
+            $fromClientCookie = $this->resolveId();
+            $this->loadData($fromClientCookie);
+        }
+
         $oldId = $this->sessionId;
         if ($oldId !== null && $deleteOldSession) {
             $this->redis->executeCommand('DEL', [$this->keyPrefix . $oldId]);
@@ -204,6 +210,106 @@ class CoroutineSession extends Session
         return new SessionDataIterator($this->data);
     }
 
+    // --- flash messages -------------------------------------------------
+    // yii\web\Session implements the flash API on top of the process-global
+    // $_SESSION array, which is shared by every coroutine. These overrides
+    // keep the exact same counter semantics but operate on the coroutine-local
+    // payload instead.
+
+    public function setFlash($key, $value = true, $removeAfterAccess = true): void
+    {
+        $this->open();
+        $counters = $this->flashCounters();
+        $counters[$key] = $removeAfterAccess ? -1 : 0;
+        $this->data[$key] = $value;
+        $this->data[$this->flashParam] = $counters;
+        $this->persist();
+    }
+
+    public function addFlash($key, $value = true, $removeAfterAccess = true): void
+    {
+        $this->open();
+        $counters = $this->flashCounters();
+        $counters[$key] = $removeAfterAccess ? -1 : 0;
+        $this->data[$this->flashParam] = $counters;
+
+        if (empty($this->data[$key])) {
+            $this->data[$key] = [$value];
+        } elseif (is_array($this->data[$key])) {
+            $this->data[$key][] = $value;
+        } else {
+            $this->data[$key] = [$this->data[$key], $value];
+        }
+        $this->persist();
+    }
+
+    public function getFlash($key, $defaultValue = null, $delete = false): mixed
+    {
+        $this->open();
+        $counters = $this->flashCounters();
+        if (!isset($counters[$key])) {
+            return $defaultValue;
+        }
+
+        $value = $this->data[$key] ?? $defaultValue;
+        if ($delete) {
+            $this->removeFlash($key);
+        } elseif ($counters[$key] < 0) {
+            // Mark for deletion in the next request.
+            $counters[$key] = 1;
+            $this->data[$this->flashParam] = $counters;
+            $this->persist();
+        }
+
+        return $value;
+    }
+
+    public function getAllFlashes($delete = false): array
+    {
+        $this->open();
+        $counters = $this->flashCounters();
+        $flashes = [];
+        foreach (array_keys($counters) as $key) {
+            if (array_key_exists($key, $this->data)) {
+                $flashes[$key] = $this->data[$key];
+                if ($delete) {
+                    unset($counters[$key], $this->data[$key]);
+                } elseif ($counters[$key] < 0) {
+                    $counters[$key] = 1;
+                }
+            } else {
+                unset($counters[$key]);
+            }
+        }
+
+        $this->data[$this->flashParam] = $counters;
+        $this->persist();
+
+        return $flashes;
+    }
+
+    public function removeFlash($key): mixed
+    {
+        $this->open();
+        $counters = $this->flashCounters();
+        $value = isset($this->data[$key], $counters[$key]) ? $this->data[$key] : null;
+        unset($counters[$key], $this->data[$key]);
+        $this->data[$this->flashParam] = $counters;
+        $this->persist();
+
+        return $value;
+    }
+
+    public function removeAllFlashes(): void
+    {
+        $this->open();
+        foreach (array_keys($this->flashCounters()) as $key) {
+            unset($this->data[$key]);
+        }
+        unset($this->data[$this->flashParam]);
+        $this->persist();
+    }
+
     public function offsetExists($offset): bool
     {
         return $this->has($offset);
@@ -229,20 +335,116 @@ class CoroutineSession extends Session
         return $this->opened;
     }
 
+    /**
+     * The native implementation looks at the process-global `$_COOKIE` array,
+     * which Swoole never populates. `yii\web\User::renewAuthStatus()` uses
+     * this method to decide whether it may read the identity from the
+     * session, so without the override every request after a login would be
+     * treated as a guest.
+     */
+    public function getHasSessionId(): bool
+    {
+        $app = Yii::$app;
+        if (!$app instanceof \yii\web\Application) {
+            return false;
+        }
+
+        $cookie = $app->getRequest()->getCookies()->get($this->getName());
+
+        return is_string($cookie->value ?? null) && $cookie->value !== '';
+    }
+
     private function storageKey(): string
     {
         return $this->keyPrefix . $this->sessionId;
     }
 
-    private function resolveSessionId(): string
+    /**
+     * Resolves the session id for this request. An explicitly assigned id
+     * (setId()) wins over the client cookie, matching yii\web\Session
+     * semantics (session_id($this->getId())).
+     *
+     * @return bool whether the id was taken from the client cookie
+     */
+    private function resolveId(): bool
     {
-        $clientId = $this->resolveClientSessionId();
-        if ($clientId !== null) {
-            $this->idFromClient = true;
-            return $clientId;
+        if ($this->sessionId !== null) {
+            return false;
         }
 
-        return $this->generateSessionId();
+        $cookieId = $this->resolveClientSessionId();
+        if ($cookieId !== null) {
+            $this->sessionId = $cookieId;
+            $this->idFromClient = true;
+
+            return true;
+        }
+
+        $this->sessionId = $this->generateSessionId();
+
+        return false;
+    }
+
+    /**
+     * Loads the session payload for the current id.
+     */
+    private function loadData(bool $fromClientCookie): void
+    {
+        $raw = $this->redis->executeCommand('GET', [$this->storageKey()]);
+        $exists = is_string($raw) && $raw !== '';
+
+        if ($this->useStrictMode && $fromClientCookie && !$exists) {
+            // Uninitialized id supplied by the client: never adopt it,
+            // otherwise an attacker-chosen id survives the login.
+            $this->sessionId = $this->generateSessionId();
+            $this->idFromClient = false;
+            $this->data = [];
+
+            return;
+        }
+
+        $decoded = $exists ? @unserialize($raw) : null;
+        $this->data = is_array($decoded) ? $decoded : [];
+    }
+
+    /**
+     * @return array<string, int> flash message counters
+     */
+    private function flashCounters(): array
+    {
+        $counters = $this->data[$this->flashParam] ?? [];
+
+        return is_array($counters) ? $counters : [];
+    }
+
+    /**
+     * Native sessions age flash counters when the session starts: 0 becomes 1
+     * (visible for one more request) and anything above 0 drops the message.
+     */
+    protected function updateFlashCounters(): void
+    {
+        $counters = $this->flashCounters();
+        if ($counters === []) {
+            unset($this->data[$this->flashParam]);
+
+            return;
+        }
+
+        $changed = false;
+        foreach ($counters as $key => $count) {
+            if ((int) $count > 0) {
+                unset($counters[$key], $this->data[$key]);
+                $changed = true;
+            } elseif ((int) $count === 0) {
+                $counters[$key] = 1;
+                $changed = true;
+            }
+        }
+
+        $this->data[$this->flashParam] = $counters;
+        if ($changed) {
+            $this->persist();
+        }
     }
 
     private function resolveClientSessionId(): ?string

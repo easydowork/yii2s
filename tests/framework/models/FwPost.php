@@ -1,11 +1,32 @@
 <?php
 
+/**
+ * @link https://github.com/yii2s/yii2-swoole
+ * @copyright Copyright (c) 2026 Yii2S Software LLC
+ * @license MIT
+ */
+
 namespace yii2stest\framework\models;
 
 use yii\behaviors\SluggableBehavior;
 use yii\behaviors\TimestampBehavior;
 use yii\db\ActiveRecord;
 
+/**
+ * @property int $id
+ * @property string $title
+ * @property string $slug
+ * @property string $content
+ * @property int $views
+ * @property int $version
+ * @property int $status
+ * @property int $author_id
+ * @property int $created_at
+ * @property int $updated_at
+ * @property FwUser $author
+ * @property FwComment[] $comments
+ * @property FwTag[] $tags
+ */
 class FwPost extends ActiveRecord
 {
     public const STATUS_DRAFT = 0;

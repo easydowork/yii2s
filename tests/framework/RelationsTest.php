@@ -1,5 +1,11 @@
 <?php
 
+/**
+ * @link https://github.com/yii2s/yii2-swoole
+ * @copyright Copyright (c) 2026 Yii2S Software LLC
+ * @license MIT
+ */
+
 declare(strict_types=1);
 
 namespace yii2stest\framework;
@@ -81,9 +87,8 @@ class RelationsTest extends DatabaseTestCase
                 ->all();
             $this->assertCount(3, $comments);
             foreach ($comments as $c) {
-                $this->assertNotNull($c->post);
-                $this->assertNotNull($c->post->author);
-                $this->assertNotEmpty($c->post->author->username);
+                $this->assertNotSame("", $c->post->content, "eager-loaded post is populated");
+                $this->assertNotEmpty($c->post->author->username, "nested relation is populated");
             }
         });
     }

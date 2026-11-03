@@ -6,6 +6,9 @@ $config = [
     'id' => 'blog',
     'basePath' => dirname(__DIR__),
     'bootstrap' => [
+        // Standard Yii2 practice: instantiate the log dispatcher, otherwise
+        // Yii::error() messages never reach the configured targets.
+        'log',
         ['class' => \Yii2S\Swoole\Bootstrap::class],
     ],
     'controllerNamespace' => 'app\controllers',
@@ -15,17 +18,22 @@ $config = [
     ],
     'components' => [
         'db' => array_merge($common['components']['db'], ['enableCoroutinePooling' => true]),
-        'redis' => [
-            'class' => \Yii2S\Swoole\Redis\CoroutineRedisConnection::class,
-            'hostname' => '127.0.0.1',
-            'port' => 6379,
-            'poolMaxActive' => 10,
-        ],
         'request' => [
             'cookieValidationKey' => 'blog-demo-validation-key',
         ],
+        // Standard Yii2 wiring: route exceptions through site/error so the
+        // custom error view (views/site/error.php) is rendered.
+        'errorHandler' => [
+            'errorAction' => 'site/error',
+        ],
         'session' => [
             'class' => \Yii2S\Swoole\Session\CoroutineSession::class,
+            'cookieParams' => ['httpOnly' => true, 'sameSite' => 'Lax'],
+        ],
+        'cache' => [
+            'class' => \Yii2S\Swoole\Cache\CoroutineRedisCache::class,
+            'redis' => 'redis',
+            'keyPrefix' => 'blog:cache:',
         ],
         'user' => [
             'identityClass' => app\models\User::class,
@@ -42,19 +50,26 @@ $config = [
             'rules' => [
                 'GET api/posts' => 'api/post/index',
                 'POST api/posts' => 'api/post/create',
-                'GET,DELETE api/posts/<id:\d+>' => 'api/post/view',
+                'GET api/posts/<id:\d+>' => 'api/post/view',
+                'PUT,PATCH api/posts/<id:\d+>' => 'api/post/update',
+                'DELETE api/posts/<id:\d+>' => 'api/post/delete',
             ],
         ],
         'log' => [
             'targets' => [[
                 'class' => \Yii2S\Swoole\Log\CoroutineFileTarget::class,
                 'logFile' => '@app/runtime/logs/app.log',
-                'maxBufferMessages' => 50,
+                // Demo: flush every message so the smoke test can assert log
+                // lines immediately; raise this in a real deployment.
+                'maxBufferMessages' => 1,
             ]],
         ],
         'swooleHttpServer' => [
             'class' => \Yii2S\Swoole\Server\HttpServer::class,
             'documentRoot' => '@app/web',
+            // Covers are limited to 2 MB in the controller; the request body
+            // must be a bit larger to let that validation run (default 2 MB).
+            'settings' => ['package_max_length' => 8 * 1024 * 1024],
             'dispatcher' => new \Yii2S\Swoole\Server\RequestDispatcher(__DIR__ . '/web.php'),
         ],
     ],

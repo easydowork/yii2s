@@ -51,6 +51,14 @@ class CoroutineRequest extends Request
     private array $rawCookies = [];
 
     /**
+     * @var array<string> IPs or CIDR blocks of trusted reverse proxies
+     * (e.g. `['127.0.0.1', '10.0.0.0/8']`). Only a request coming from one of
+     * these peers may set the client IP through `X-Forwarded-For`. Empty by
+     * default: forwarding headers are never trusted, matching stock Yii.
+     */
+    public array $trustedProxies = [];
+
+    /**
      * Binds the request to a Swoole HTTP request for the current coroutine.
      */
     public function setSwooleRequest(SwooleRequest $request): void
@@ -368,9 +376,88 @@ class CoroutineRequest extends Request
         return false;
     }
 
+    /**
+     * Client IP. Behind a trusted reverse proxy (see [[trustedProxies]]) the
+     * right-most untrusted address of `X-Forwarded-For` wins, so rate
+     * limiting, audit logs and `yii\web\User` see the real client.
+     */
     public function getUserIP(): ?string
     {
-        return $this->serverParam('remote_addr');
+        $remote = $this->serverParam('remote_addr');
+        if ($remote === null || $this->trustedProxies === [] || !$this->isTrustedProxy($remote)) {
+            return $remote;
+        }
+
+        $forwarded = $this->getHeaders()->get('X-Forwarded-For');
+        if (!is_string($forwarded) || $forwarded === '') {
+            return $remote;
+        }
+
+        $chain = array_values(array_filter(
+            array_map('trim', explode(',', $forwarded)),
+            static fn (string $ip): bool => $ip !== ''
+        ));
+
+        // Walk from the closest proxy backwards and return the first address
+        // that is not itself a trusted proxy - that is the real client.
+        for ($i = count($chain) - 1; $i >= 0; $i--) {
+            if (!$this->isTrustedProxy($chain[$i])) {
+                return $chain[$i];
+            }
+        }
+
+        return $chain[0] ?? $remote;
+    }
+
+    private function isTrustedProxy(string $ip): bool
+    {
+        foreach ($this->trustedProxies as $trusted) {
+            if (str_contains($trusted, '/')) {
+                if (self::ipInCidr($ip, $trusted)) {
+                    return true;
+                }
+            } elseif (strcasecmp($trusted, $ip) === 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static function ipInCidr(string $ip, string $cidr): bool
+    {
+        $parts = explode('/', $cidr, 2);
+        $subnet = $parts[0];
+        $bits = $parts[1] ?? null;
+        if ($bits === null || $bits === '' || !ctype_digit($bits)) {
+            return false;
+        }
+
+        $ipBin = @inet_pton($ip);
+        $subnetBin = @inet_pton($subnet);
+        if ($ipBin === false || $subnetBin === false || strlen($ipBin) !== strlen($subnetBin)) {
+            return false;
+        }
+
+        $bits = (int) $bits;
+        $maxBits = strlen($ipBin) * 8;
+        if ($bits < 0 || $bits > $maxBits) {
+            return false;
+        }
+
+        $wholeBytes = intdiv($bits, 8);
+        if ($wholeBytes > 0 && strncmp($ipBin, $subnetBin, $wholeBytes) !== 0) {
+            return false;
+        }
+
+        $remainingBits = $bits % 8;
+        if ($remainingBits === 0) {
+            return true;
+        }
+
+        $mask = (0xFF << (8 - $remainingBits)) & 0xFF;
+
+        return (ord($ipBin[$wholeBytes]) & $mask) === (ord($subnetBin[$wholeBytes]) & $mask);
     }
 
     public function getUserHost(): ?string
@@ -416,7 +503,11 @@ class CoroutineRequest extends Request
                 if ($data === false) {
                     continue; // tampered or foreign cookie - drop silently
                 }
-                $data = @unserialize($data);
+                // Match stock yii\web\Request: the HMAC only proves the payload
+                // was produced by this application, so object instantiation is
+                // disabled on top (a leaked/weak cookieValidationKey must not
+                // turn cookie parsing into PHP object injection).
+                $data = @unserialize($data, ['allowed_classes' => false]);
                 if (is_array($data) && count($data) === 2 && $data[0] === (string) $name) {
                     $cookies[(string) $name] = new Cookie([
                         'name' => (string) $name,

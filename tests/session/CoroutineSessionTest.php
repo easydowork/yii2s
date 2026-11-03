@@ -100,6 +100,24 @@ class CoroutineSessionTest extends TestCase
         });
     }
 
+    public function testClientSuppliedUnknownSessionIdIsRejected(): void
+    {
+        $this->runInCoroutine(function (): void {
+            // Strict mode (Yii2 default): an id for a non-existent session
+            // must never be adopted - otherwise an attacker can fixate the
+            // session id before the victim logs in.
+            $_COOKIE[Yii::$app->session->getName()] = 'attackerchosenid';
+            $session = Yii::$app->session;
+            $session->open();
+
+            $newId = $session->getId();
+            $this->assertNotSame('attackerchosenid', $newId);
+
+            $session->set('user', 1);
+            $this->assertSame($newId, $session->getId(), 'the regenerated id must stay stable');
+        });
+    }
+
     public function testRegenerateId(): void
     {
         $this->runInCoroutine(function (): void {
