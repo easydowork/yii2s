@@ -73,6 +73,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   moderation, Redis view counter, cached front page with version invalidation,
   queue worker + audit log, CSV export through `sendFile()`, API-key
   authenticated REST API, and `scripts/smoke.sh` (52 end-to-end checks).
+- **Strict URL parsing**: with `enableStrictParsing`, an unmatched path made
+  `UrlManager::parseRequest()` return `false`, which the coroutine request
+  destructured into a 500. It now throws a 404 like the stock request.
+- **Raw routes**: `RequestDispatcher::addRawRoute()` answers an exact
+  `METHOD /path` without creating the Yii request/response (string ->
+  text/plain, array -> JSON, null -> handler owns the Swoole response).
+  Measured 55-62k QPS per process vs ~14-15k for the full Yii pipeline on the
+  same machine. Bypasses routing/session/CSRF/auth by design, so it is meant
+  for public stateless endpoints (health checks, metrics, tiny APIs).
 - **Real client IP behind a reverse proxy**: `CoroutineRequest::$trustedProxies`
   accepts IPs/CIDR blocks; when the direct peer is trusted, `getUserIP()`
   resolves the right-most untrusted `X-Forwarded-For` hop. Empty by default, so

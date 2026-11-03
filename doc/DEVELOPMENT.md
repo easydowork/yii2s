@@ -295,6 +295,8 @@ php yii swoole/start
 ```
 ┌─ Swoole 收到 HTTP 请求 ──────────────────────────────────────────────┐
 │                                                                     │
+│  ⓪ raw 路由精确匹配（METHOD + path）？                               │
+│        └─是─► handler 直接写 Swoole 响应（不建 Yii 对象）──────────► 响应
 │  ① documentRoot 命中静态文件？                                       │
 │        └─是─► StaticFileServer（扩展名黑名单 + realpath 前缀校验）──► 响应
 │  ② 路径 = /__pool 且已开启？                                         │
@@ -658,7 +660,7 @@ total_borrowed=14144、total_timeouts=0、active=0/idle=20——**零泄漏**。
 
 ## 5.1 测试体系
 
-164 tests / 713 assertions（2 skipped），覆盖十一个目录：连接池并发（借还配对/超时/sweep）、
+166 tests / 726 assertions（2 skipped），覆盖十一个目录：连接池并发（借还配对/超时/sweep）、
 请求适配（头/cookie 签名/上传三种形状）、服务器集成（**真实 socket 交互，非 mock**：
 CSRF 全流程、表单三件套、静态文件、优雅停机、watch 热重载）、DB（事务含嵌套
 savepoint、并发 AR + 并发事务、Query::batch、协程外 detached 直连）、Redis
@@ -671,10 +673,10 @@ savepoint、并发 AR + 并发事务、Query::batch、协程外 detached 直连�
 
 | 运行时 | 测试 | 用途 |
 |---|---|---|
-| macOS + swoole-cli 6.2.0 / PHP 8.4 | 164/713 ✅（2 skipped） | 全套集成测试（真实 socket、优雅停机、watch、pid）+ PHPStan + cs |
+| macOS + swoole-cli 6.2.0 / PHP 8.4 | 166/726 ✅（2 skipped） | 全套集成测试（真实 socket、优雅停机、watch、pid）+ PHPStan + cs |
 | macOS + swoole-cli（进程级 e2e / 基准） | e2e 13 checks / 8148-3330-3616 QPS | start/status/reload respawn/SIGTERM 全过；`/`、`/demo/db`、`/demo/redis`（50 并发 3s，0 错误、池零超时） |
-| WSL Ubuntu + swoole-cli 6.2.2 | 164/713 ✅ | 端到端（start/status/reload respawn/SIGTERM）+ 基准 |
-| WSL Ubuntu + pecl PHP 8.5 / swoole 6.2.4 | 164/713 ✅ | **CI 同源标准构建**（`http_parse_files` 修复的实战检验） |
+| WSL Ubuntu + swoole-cli 6.2.2 | 166/726 ✅ | 端到端（start/status/reload respawn/SIGTERM）+ 基准 |
+| WSL Ubuntu + pecl PHP 8.5 / swoole 6.2.4 | 166/726 ✅ | **CI 同源标准构建**（`http_parse_files` 修复的实战检验） |
 | GitHub Actions | pecl 矩阵 PHP 8.2–8.5 | 云端矩阵 |
 
 独立外部 AI 评审四轮（见附录 B）：第一轮 6 缺陷、第二轮 2 项增量、第三轮
@@ -727,6 +729,7 @@ swoole-cli vendor/bin/php-cs-fixer check --diff
 | 错误处理 | HttpException 状态码、未知路由 404、未捕获异常 500 | `testErrorHandling` |
 | 错误页 | 异常经 `errorHandler.errorAction` 渲染成自定义错误视图（而非纯文本兜底） | `testErrorActionRendersCustomErrorPage` |
 | 一行接入 | `Bootstrap` 自动替换组件在**首请求**即生效（`yii\web\Application::bootstrap()` 预先创建的 stock 实例被丢弃） | `testOneLineBootstrapOnFirstRequest` |
+| raw 路由 | 精确 `METHOD + path` 匹配、string→text/plain、array→JSON、query 不参与、方法不匹配回落 Yii、异常 500 | `RawRouteTest` |
 | 常驻服务 | DB 事务回滚、Cache、Redis、子协程连接池、日志落盘 | `testResidentServices` |
 | 并发隔离 | 并发请求的 query 不串、会话/身份不串 | `testConcurrentRequestsAreIsolated`、`testConcurrentSessionsAndIdentitiesAreIsolated` |
 
@@ -738,6 +741,10 @@ Log（`tests/log/`）、控制台（`tests/console/`）、上传/web（`tests/we
 **扩展方式**：在 `tests/compat/CompatController.php` 加一个 action 暴露该功能，
 再到 `CompatHttpFeaturesTest` 加一个方法（`withServer()` 内部即真实请求），
 同时在 `tests/data/app-compat.php` 里补齐该功能需要的组件配置。
+
+> raw 路由的性能定位（同机、ab -k c=50、单进程）：raw `/ping` 5.5–6.2 万 QPS，
+> 完整 Yii 路由 1.4–1.5 万，裸 Swoole 5.8–6.3 万。也就是说 raw 路由基本贴着
+> Swoole 上限跑，适合健康检查/指标/极简无状态接口；需要鉴权与框架能力的接口仍走 Yii。
 
 另有一条**真实示例**的端到端检查：`examples/blog/scripts/smoke.sh`（52 项）
 会启动博客服务并用 curl 走完前台/登录+CSRF/评论/封面上传+静态文件/CSV 下载/

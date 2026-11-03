@@ -32,11 +32,18 @@ class SwooleResponseSender
         $stream = $response->stream;
         $streaming = is_array($stream) && isset($stream[0], $stream[1], $stream[2]) && is_resource($stream[0]);
 
-        $swooleResponse->status($response->statusCode);
+        // A fresh Swoole response already defaults to 200.
+        if ($response->statusCode !== 200) {
+            $swooleResponse->status($response->statusCode);
+        }
         // Streamed bodies are written with chunked transfer encoding, which
         // makes Swoole drop any Content-Length and log a warning about it.
         $this->sendHeaders($swooleResponse, $response->getHeaders(), $streaming);
-        $this->sendCookies($swooleResponse, $response->getCookies());
+
+        $cookies = $response->getCookies();
+        if (count($cookies) > 0) {
+            $this->sendCookies($swooleResponse, $cookies);
+        }
 
         if ($streaming) {
             $this->sendStream($swooleResponse, $stream);
@@ -55,7 +62,7 @@ class SwooleResponseSender
 
     private function sendHeaders(SwooleResponse $swooleResponse, HeaderCollection $headers, bool $skipContentLength = false): void
     {
-        foreach ($headers as $name => $values) {
+        foreach ($headers->toArray() as $name => $values) {
             if ($skipContentLength && strcasecmp((string) $name, 'Content-Length') === 0) {
                 continue;
             }

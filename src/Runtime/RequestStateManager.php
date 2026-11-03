@@ -66,7 +66,6 @@ class RequestStateManager
     public function cleanup(Application $app): void
     {
         self::$activeRequests--;
-        $definitions = $app->getComponents(true);
 
         // Drop the per-request $_FILES population and UploadedFile's static
         // cache (see CoroutineRequest::setSwooleRequest()).
@@ -75,9 +74,15 @@ class RequestStateManager
             \yii\web\UploadedFile::reset();
         }
 
-        foreach (self::REQUEST_SCOPED_COMPONENTS as $id) {
-            if (isset($definitions[$id])) {
-                $app->set($id, $definitions[$id]);
+        // CoroutineApplication resolves these four ids from the coroutine
+        // context, so the shared definitions never hold a stale instance and
+        // do not need to be reset on every request.
+        if (!$app instanceof CoroutineApplication) {
+            $definitions = $app->getComponents(true);
+            foreach (self::REQUEST_SCOPED_COMPONENTS as $id) {
+                if (isset($definitions[$id])) {
+                    $app->set($id, $definitions[$id]);
+                }
             }
         }
 
@@ -112,7 +117,11 @@ class RequestStateManager
         }
 
         // Persist buffered log messages; the resident process never runs the
-        // FPM-style end-of-request flush.
-        Yii::getLogger()->flush(true);
+        // FPM-style end-of-request flush. Skipping the dispatch when nothing
+        // was logged saves the whole target pipeline on quiet requests.
+        $logger = Yii::getLogger();
+        if ($logger->messages !== []) {
+            $logger->flush(true);
+        }
     }
 }

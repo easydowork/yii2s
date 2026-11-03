@@ -56,13 +56,21 @@ abstract class CompatTestCase extends DatabaseTestCase
      */
     protected function startServer(string $config = 'app-compat.php'): void
     {
+        $this->startServerWithDispatcher(new RequestDispatcher(__DIR__ . '/../data/' . $config));
+    }
+
+    /**
+     * Starts the server with a prepared dispatcher (e.g. with raw routes).
+     */
+    protected function startServerWithDispatcher(RequestDispatcher $dispatcher): void
+    {
         $this->port = random_int(31000, 39999);
         $this->server = Yii::createObject([
             'class' => HttpServer::class,
             'host' => '127.0.0.1',
             'port' => $this->port,
             'enableSignalHandling' => false,
-            'dispatcher' => new RequestDispatcher(__DIR__ . '/../data/' . $config),
+            'dispatcher' => $dispatcher,
         ]);
 
         $server = $this->server;

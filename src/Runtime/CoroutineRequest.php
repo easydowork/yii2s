@@ -16,6 +16,7 @@ use yii\base\InvalidConfigException;
 use yii\web\Cookie;
 use yii\web\CookieCollection;
 use yii\web\HeaderCollection;
+use yii\web\NotFoundHttpException;
 use yii\web\Request;
 
 /**
@@ -93,7 +94,14 @@ class CoroutineRequest extends Request
 
     public function resolve(): array
     {
-        [$route, $params] = Yii::$app->getUrlManager()->parseRequest($this);
+        $result = Yii::$app->getUrlManager()->parseRequest($this);
+        if ($result === false) {
+            // enableStrictParsing: no rule matched. Stock Request throws 404;
+            // destructuring `false` here used to produce a 500 instead.
+            throw new NotFoundHttpException(Yii::t('yii', 'Page not found.'));
+        }
+
+        [$route, $params] = $result;
 
         return [$route, $params + $this->getQueryParams()];
     }

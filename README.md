@@ -149,6 +149,37 @@ php yii swoole/start        # 就这么跑起来了
 `yii\filters\auth\HttpBasicAuth` 等直接可用。Redis 的 MULTI/PIPELINE、
 DB 的事务也都原生支持（连接在协程内粘性借用）。
 
+## 极简接口快速通道（raw 路由）
+
+健康检查、指标、极简只读接口这类请求，可以注册 **raw 路由**：命中后**不创建 Yii 的
+request/response**，直接写回 Swoole 响应。同一台机器、同一个 `ab` 客户端实测：
+
+| 路径 | QPS（单进程） |
+|---|---|
+| raw 路由 `/ping` | **55,000 – 62,000** |
+| 完整 Yii 路由 `/` | 14,200 – 15,000 |
+| 裸 Swoole（无框架） | 58,000 – 63,000 |
+
+```php
+// config/web.php（需要显式配置 swooleHttpServer.dispatcher）
+'swooleHttpServer' => [
+    'class' => \Yii2S\Swoole\Server\HttpServer::class,
+    'documentRoot' => '@app/web',
+    'dispatcher' => (new \Yii2S\Swoole\Server\RequestDispatcher(__DIR__ . '/web.php', [
+        'enablePoolMetricsEndpoint' => true,
+    ]))
+        ->addRawRoute('GET', '/ping', static fn (): string => 'pong')
+        ->addRawRoute('GET', '/health', static fn (): array => ['ok' => true]),
+],
+```
+
+- 返回值：`string` → `text/plain`；`array` → `application/json`；`null` → handler 自己
+  操作 Swoole response（签名 `(Request $request, Response $response)`）。
+- 精确匹配 `METHOD + path`，query 不参与匹配；方法不匹配会**回落**到 Yii 路由。
+- **绕过 Yii**：不经过路由、session、CSRF、用户认证。只放公开/无状态端点；
+  需要鉴权、限流或审计的接口不要用 raw 路由。
+- raw 路由、普通 Yii 路由、静态文件可以共存于同一个 dispatcher。
+
 ## 控制台命令
 
 ```bash
@@ -270,7 +301,7 @@ swoole-cli scripts/bench.php --path=/demo/db --concurrency=100 --duration=5
 ## 开发与测试
 
 目标平台 Linux；测试可在 Linux/WSL2 与 macOS（swoole-cli）上完整运行，
-全量 164 tests / 713 assertions（2 skipped）全绿（macOS + swoole-cli 6.2.0 /
+全量 166 tests / 726 assertions（2 skipped）全绿（macOS + swoole-cli 6.2.0 /
 PHP 8.4 实测；CI 同源的 pecl 构建跑同一套用例）。
 其中 `tests/compat/` 是按功能点组织的迁移兼容性套件（路由、请求、响应格式、
 Cookie、CSRF、会话、登录、Flash、上传、下载、错误处理、常驻服务、并发隔离），

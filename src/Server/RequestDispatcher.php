@@ -66,6 +66,11 @@ class RequestDispatcher implements RequestDispatcherInterface
 
     private RequestStateManager $stateManager;
 
+    /**
+     * @var array<string, callable> raw routes keyed by "METHOD /path"
+     */
+    private array $rawRoutes = [];
+
     public function __construct(?string $appConfig = null, array $config = [])
     {
         $this->appConfig = $appConfig;
@@ -135,12 +140,97 @@ class RequestDispatcher implements RequestDispatcherInterface
         return $this->staticFileServer->serve($swooleRequest, $swooleResponse);
     }
 
+    /**
+     * Registers a raw route: an exact `METHOD /path` match that is answered
+     * without creating the Yii request/response objects.
+     *
+     * The handler receives the Swoole request/response and may return:
+     *  - a string  -> text/plain response body
+     *  - an array  -> JSON response body
+     *  - null      -> the handler already wrote the response itself
+     *
+     * Raw routes bypass routing, session, CSRF and user authentication. Use
+     * them for public/stateless endpoints only (health checks, metrics, tiny
+     * read-only APIs); anything that needs the framework belongs in Yii.
+     *
+     * @param callable(Request, Response): (string|array|null) $handler
+     */
+    public function addRawRoute(string $method, string $path, callable $handler): self
+    {
+        $this->rawRoutes[strtoupper($method) . ' ' . $path] = $handler;
+
+        return $this;
+    }
+
+    /**
+     * @return array<string, callable>
+     */
+    public function getRawRoutes(): array
+    {
+        return $this->rawRoutes;
+    }
+
+    /**
+     * Answers a registered raw route. Returns false when the request is not
+     * a raw route and the normal Yii pipeline should handle it.
+     */
+    private function tryRawRoute(Request $request, Response $response): bool
+    {
+        $uri = (string) ($request->server['request_uri'] ?? '');
+        $path = parse_url($uri, PHP_URL_PATH);
+        if (!is_string($path)) {
+            return false;
+        }
+
+        $method = strtoupper((string) ($request->server['request_method'] ?? 'GET'));
+        $handler = $this->rawRoutes[$method . ' ' . $path] ?? null;
+        if ($handler === null) {
+            return false;
+        }
+
+        try {
+            $result = $handler($request, $response);
+            if (!$response->isWritable() || $result === null) {
+                return true; // the handler owns the response
+            }
+
+            if (is_array($result)) {
+                $json = json_encode($result, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                if ($json === false) {
+                    throw new \RuntimeException('Raw route returned data that cannot be JSON-encoded.');
+                }
+                $response->header('Content-Type', 'application/json; charset=UTF-8');
+                $response->end($json);
+
+                return true;
+            }
+
+            $response->header('Content-Type', 'text/plain; charset=UTF-8');
+            $response->end(is_scalar($result) ? (string) $result : '');
+
+            return true;
+        } catch (Throwable $exception) {
+            Yii::error('Raw route ' . $method . ' ' . $path . ' failed: ' . $exception->getMessage(), __METHOD__);
+            if ($response->isWritable()) {
+                $response->status(500);
+                $response->header('Content-Type', 'text/plain; charset=UTF-8');
+                $response->end('Internal Server Error');
+            }
+
+            return true;
+        }
+    }
+
     public function dispatch(Request $swooleRequest, Response $swooleResponse, SwooleCoroutineHttpServer $server): void
     {
         // Static files and the metrics endpoint run outside the Yii request
         // lifecycle. A malformed path must never escape as an uncaught
         // exception: inside a coroutine that terminates the worker.
         try {
+            if ($this->rawRoutes !== [] && $this->tryRawRoute($swooleRequest, $swooleResponse)) {
+                return;
+            }
+
             if ($this->tryServeStaticFile($swooleRequest, $swooleResponse)) {
                 return;
             }
