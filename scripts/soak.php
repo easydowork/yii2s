@@ -51,19 +51,49 @@ function poolMetrics(string $host, int $port): ?array
     return is_array($decoded) ? $decoded : null;
 }
 
-/** @return int|null RSS in kilobytes */
+/**
+ * Total RSS in kilobytes of the server process tree rooted at `$pid`
+ * (master + manager + workers). A memory leak shows up in the workers, which
+ * own the application and pools - not in the lightweight master - so the tree
+ * total is the meaningful number.
+ *
+ * @return int|null
+ */
 function rssKb(int $pid): ?int
 {
     if ($pid <= 0) {
         return null;
     }
-    $out = shell_exec('ps -o rss= -p ' . $pid . ' 2>/dev/null');
-    if (!is_string($out)) {
-        return null;
-    }
-    $rss = (int) trim($out);
 
-    return $rss > 0 ? $rss : null;
+    // Walk the process tree: master -> manager -> workers (Swoole has at most
+    // this depth), collecting every pid.
+    $pids = [$pid];
+    $frontier = [$pid];
+    for ($depth = 0; $depth < 4 && $frontier !== []; $depth++) {
+        $next = [];
+        foreach ($frontier as $p) {
+            $out = shell_exec("pgrep -P {$p} 2>/dev/null");
+            if (!is_string($out)) {
+                continue;
+            }
+            foreach (preg_split('/\s+/', trim($out)) ?: [] as $child) {
+                $child = (int) $child;
+                if ($child > 0) {
+                    $next[] = $child;
+                    $pids[] = $child;
+                }
+            }
+        }
+        $frontier = $next;
+    }
+
+    $total = 0;
+    foreach (array_unique($pids) as $p) {
+        $out = shell_exec("ps -o rss= -p {$p} 2>/dev/null");
+        $total += (int) trim((string) $out);
+    }
+
+    return $total > 0 ? $total : null;
 }
 
 \Swoole\Coroutine\run(function () use ($host, $port, $path, $concurrency, $duration, $interval, $pid): void {
@@ -74,17 +104,40 @@ function rssKb(int $pid): ?int
 
     $startRss = rssKb($pid);
     $samples = [];
+    $start = microtime(true);
 
-    // Sampler coroutine: record pool metrics and RSS on a fixed cadence.
-    \Swoole\Coroutine::create(function () use ($host, $port, $interval, $deadline, $pid, &$samples): void {
+    // Sampler coroutine: record pool metrics and RSS on a fixed cadence, and
+    // write one time-series line per sample so a long run leaves a plottable
+    // curve instead of only a first-vs-last summary.
+    \Swoole\Coroutine::create(function () use ($host, $port, $interval, $deadline, $pid, $start, &$samples): void {
         while (microtime(true) < $deadline) {
             $metrics = poolMetrics($host, $port);
             if ($metrics !== null) {
+                $rss = rssKb($pid);
                 $samples[] = [
                     't' => microtime(true),
                     'metrics' => $metrics,
-                    'rss' => rssKb($pid),
+                    'rss' => $rss,
                 ];
+
+                $elapsed = (int) round(microtime(true) - $start);
+                $rssMb = $rss !== null ? round($rss / 1024) . 'MB' : 'n/a';
+                $pools = $metrics['pools'] ?? $metrics;
+                $parts = [];
+                foreach ($pools as $id => $m) {
+                    if (!is_array($m)) {
+                        continue;
+                    }
+                    $parts[] = sprintf(
+                        '%s{size=%d,active=%d,discarded=%d,timeouts=%d}',
+                        $id,
+                        (int) ($m['size'] ?? 0),
+                        (int) ($m['active'] ?? 0),
+                        (int) ($m['total_discarded'] ?? 0),
+                        (int) ($m['total_timeouts'] ?? 0)
+                    );
+                }
+                fwrite(STDOUT, sprintf("[+%ds] rss=%s %s\n", $elapsed, $rssMb, implode(' ', $parts)));
             }
             \Swoole\Coroutine::sleep($interval);
         }

@@ -55,11 +55,30 @@ class CoroutineCommand extends Command
     protected function queryInternal($method, $fetchMode = null)
     {
         try {
-            return parent::queryInternal($method, $fetchMode);
+            // queryInternal() is the single choke point for every statement
+            // (execute/queryAll/queryScalar/...), so the circuit breaker wraps
+            // it here - wrapping execute() too would count each failure twice.
+            return $this->throughCircuit(fn () => parent::queryInternal($method, $fetchMode));
         } catch (\Throwable $e) {
             $this->discardIfConnectionLost($e);
             throw $e;
         }
+    }
+
+    /**
+     * Runs a DB operation through the owner's circuit breaker (when enabled).
+     * Only connection-loss errors count toward opening the circuit; plain SQL
+     * errors (constraint violations, deadlocks, syntax errors) still propagate
+     * but never trip it.
+     */
+    private function throughCircuit(callable $operation)
+    {
+        $breaker = $this->owner?->getCircuitBreaker();
+        if ($breaker === null) {
+            return $operation();
+        }
+
+        return $breaker->call($operation, null, static fn (\Throwable $e): bool => self::isConnectionLost($e));
     }
 
     private function discardIfConnectionLost(\Throwable $e): void
@@ -87,9 +106,10 @@ class CoroutineCommand extends Command
                 return true;
             }
 
-            // MySQL/MariaDB surface their connection losses under HY000, so
-            // fall back to the driver-specific codes.
-            if (in_array((int) $driverCode, [2006, 2013], true)) {
+            // MySQL/MariaDB surface their connection problems under HY000, so
+            // fall back to the driver-specific codes: 2002/2003/2005 (cannot
+            // reach the server) and 2006/2013 (an established connection died).
+            if (in_array((int) $driverCode, [2002, 2003, 2005, 2006, 2013], true)) {
                 return true;
             }
         }

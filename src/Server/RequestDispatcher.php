@@ -418,6 +418,35 @@ class RequestDispatcher implements RequestDispatcherInterface
     }
 
     /**
+     * Runs one pass of connection-pool upkeep (max-lifetime recycling, idle
+     * keepalive, min-idle replenishment) across every pool of the resident
+     * application. Called periodically by the server's pool keeper.
+     *
+     * @return int total number of connections recycled during this pass
+     */
+    public function maintainPools(): int
+    {
+        try {
+            $pools = PoolMetricsCollector::collect($this->getApplication());
+        } catch (Throwable $e) {
+            Yii::error('Connection pool maintenance failed: ' . $e->getMessage(), __METHOD__);
+
+            return 0;
+        }
+
+        $recycled = 0;
+        foreach ($pools as $id => $pool) {
+            try {
+                $recycled += $pool->maintain();
+            } catch (Throwable $e) {
+                Yii::error("Failed to maintain pool '{$id}': " . $e->getMessage(), __METHOD__);
+            }
+        }
+
+        return $recycled;
+    }
+
+    /**
      * Creates the resident Yii2 application instance (once).
      */
     private function getApplication(): WebApplication

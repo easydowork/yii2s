@@ -29,4 +29,12 @@ interface RequestDispatcherInterface
      * instantiates the pooled components)
      */
     public function prewarm(int $connections = 0): void;
+
+    /**
+     * Runs one pass of connection-pool upkeep (max-lifetime recycling, idle
+     * keepalive, min-idle replenishment). Implementations may be a no-op.
+     *
+     * @return int total number of connections recycled during this pass
+     */
+    public function maintainPools(): int;
 }

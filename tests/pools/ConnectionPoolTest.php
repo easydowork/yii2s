@@ -164,4 +164,76 @@ class ConnectionPoolTest extends TestCase
             $this->assertSame(1, $metrics['total_discarded']);
         });
     }
+
+    public function testMaxLifetimeRecyclesExpiredConnectionOnBorrow(): void
+    {
+        $pool = new ConnectionPool(fn (): object => new \stdClass(), 5, 0.1, null, null, 0, 0.05);
+
+        $this->runInCoroutine(function () use ($pool): void {
+            $pool->return($pool->borrow());
+            $this->assertSame(1, $pool->getIdleCount());
+
+            \Swoole\Coroutine::sleep(0.1); // exceed the 50ms max lifetime
+
+            $pool->return($pool->borrow()); // borrow recycles the expired connection
+        });
+
+        $metrics = $pool->getMetrics();
+        $this->assertSame(1, $metrics['total_discarded'], 'expired connection is recycled');
+        $this->assertSame(2, $metrics['total_created'], 'a replacement connection is created');
+        $this->assertSame(1, $pool->getSize());
+    }
+
+    public function testMaxLifetimeRecyclesExpiredConnectionOnReturn(): void
+    {
+        $pool = new ConnectionPool(fn (): object => new \stdClass(), 5, 0.1, null, null, 0, 0.05);
+
+        $this->runInCoroutine(function () use ($pool): void {
+            $connection = $pool->borrow();
+            \Swoole\Coroutine::sleep(0.1); // exceed the 50ms max lifetime
+            $pool->return($connection);    // return() recycles instead of reusing
+        });
+
+        $metrics = $pool->getMetrics();
+        $this->assertSame(1, $metrics['total_discarded']);
+        $this->assertSame(0, $pool->getIdleCount(), 'expired connection is not returned to the pool');
+        $this->assertSame(0, $pool->getSize());
+    }
+
+    public function testMaintainReplenishesIdleToMinIdle(): void
+    {
+        $pool = new ConnectionPool(fn (): object => new \stdClass(), 5, 0.1, null, null, 3);
+
+        $this->runInCoroutine(function () use ($pool): void {
+            $pool->maintain();
+        });
+
+        $this->assertSame(3, $pool->getIdleCount(), 'idle channel is topped up to min-idle');
+        $this->assertSame(3, $pool->getSize());
+    }
+
+    public function testMaintainRecyclesStaleIdleConnection(): void
+    {
+        $pool = new ConnectionPool(
+            fn (): object => new \stdClass(),
+            5,
+            0.1,
+            null,
+            fn (object $connection): bool => false, // validator always reports dead
+            0,
+            0.0,
+            0.05 // idleTimeout
+        );
+
+        $this->runInCoroutine(function () use ($pool): void {
+            $pool->return($pool->borrow());
+            $this->assertSame(1, $pool->getIdleCount());
+
+            \Swoole\Coroutine::sleep(0.1); // idle beyond the 50ms idleTimeout
+
+            $recycled = $pool->maintain();
+            $this->assertSame(1, $recycled, 'stale idle connection is recycled');
+            $this->assertSame(0, $pool->getSize());
+        });
+    }
 }

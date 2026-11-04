@@ -25,11 +25,25 @@ class ConnectionPool
 
     public const DEFAULT_WAIT_TIMEOUT = 3.0;
 
+    public const DEFAULT_MIN_IDLE = 0;
+
+    /** 0 disables max-lifetime recycling. */
+    public const DEFAULT_MAX_LIFETIME = 0.0;
+
+    /** 0 disables idle keepalive. */
+    public const DEFAULT_IDLE_TIMEOUT = 0.0;
+
     private \Swoole\Coroutine\Channel $channel;
 
     private int $maxActive = self::DEFAULT_MAX_ACTIVE;
 
     private float $waitTimeout = self::DEFAULT_WAIT_TIMEOUT;
+
+    private int $minIdle = self::DEFAULT_MIN_IDLE;
+
+    private float $maxLifetime = self::DEFAULT_MAX_LIFETIME;
+
+    private float $idleTimeout = self::DEFAULT_IDLE_TIMEOUT;
 
     private \Closure $factory;
 
@@ -70,12 +84,25 @@ class ConnectionPool
     private array $borrowed = [];
 
     /**
+     * Per-connection timestamps keyed by spl_object_id, used for max-lifetime
+     * recycling and idle keepalive.
+     *
+     * @var array<int, array{created: float, lastUsed: float}>
+     */
+    private array $meta = [];
+
+    /**
      * @param int $maxActive maximum number of connections managed by the pool
      * @param float $waitTimeout seconds to wait for a free connection before failing
      * @param \Closure $factory creates a new connection: `function (): object`
      * @param \Closure|null $destroyer destroys a connection: `function (object $connection): void`
      * @param \Closure|null $validator validates an idle connection before reuse:
      * `function (object $connection): bool`
+     * @param int $minIdle minimum idle connections to maintain (see [[maintain()]])
+     * @param float $maxLifetime recycle connections older than this many seconds
+     * (0 disables)
+     * @param float $idleTimeout re-validate idle connections older than this many
+     * seconds (0 disables); requires a validator to be useful
      */
     public function __construct(
         \Closure $factory,
@@ -83,10 +110,16 @@ class ConnectionPool
         float $waitTimeout = self::DEFAULT_WAIT_TIMEOUT,
         ?\Closure $destroyer = null,
         ?\Closure $validator = null,
+        int $minIdle = self::DEFAULT_MIN_IDLE,
+        float $maxLifetime = self::DEFAULT_MAX_LIFETIME,
+        float $idleTimeout = self::DEFAULT_IDLE_TIMEOUT,
     ) {
         $this->factory = $factory;
         $this->maxActive = max(1, $maxActive);
         $this->waitTimeout = max(0.0, $waitTimeout);
+        $this->minIdle = max(0, min($minIdle, $this->maxActive));
+        $this->maxLifetime = max(0.0, $maxLifetime);
+        $this->idleTimeout = max(0.0, $idleTimeout);
         $this->destroyer = $destroyer;
         $this->validator = $validator;
         $this->channel = new \Swoole\Coroutine\Channel($this->maxActive);
@@ -106,7 +139,7 @@ class ConnectionPool
         // Fast path: reuse an idle connection without waiting.
         $connection = $this->channel->pop(0.001);
         if ($connection !== false) {
-            if ($this->isValid($connection)) {
+            if (!$this->isExpired($connection) && $this->isValid($connection)) {
                 return $this->take($connection);
             }
             $this->destroy($connection);
@@ -136,7 +169,7 @@ class ConnectionPool
                     continue;
                 }
 
-                if ($this->isValid($connection)) {
+                if (!$this->isExpired($connection) && $this->isValid($connection)) {
                     return $this->take($connection);
                 }
 
@@ -157,7 +190,9 @@ class ConnectionPool
     private function take(object $connection): object
     {
         $this->totalBorrowed++;
-        $this->borrowed[spl_object_id($connection)] = [$connection, \Swoole\Coroutine::getCid()];
+        $id = spl_object_id($connection);
+        $this->borrowed[$id] = [$connection, \Swoole\Coroutine::getCid()];
+        $this->meta[$id]['lastUsed'] = microtime(true);
 
         return $connection;
     }
@@ -195,12 +230,13 @@ class ConnectionPool
     }
 
     /**
-     * Returns a borrowed connection to the pool.
+     * Returns a borrowed connection to the pool. Connections that exceeded
+     * their max lifetime are recycled instead of being reused.
      */
     public function return(object $connection): void
     {
         unset($this->borrowed[spl_object_id($connection)]);
-        if ($this->closed || !$this->channel->push($connection)) {
+        if ($this->closed || $this->isExpired($connection) || !$this->channel->push($connection)) {
             $this->destroy($connection);
         }
     }
@@ -269,6 +305,7 @@ class ConnectionPool
 
         return [
             'max_active' => $this->maxActive,
+            'min_idle' => $this->minIdle,        // idle watermark target
             'size' => $this->size,               // connections that exist now
             'active' => max(0, $this->size - $idle), // currently borrowed
             'idle' => $idle,
@@ -287,6 +324,9 @@ class ConnectionPool
         try {
             $connection = ($this->factory)();
             $this->totalCreated++;
+            $now = microtime(true);
+            $this->meta[spl_object_id($connection)] = ['created' => $now, 'lastUsed' => $now];
+
             return $connection;
         } catch (\Throwable $e) {
             $this->size--;
@@ -309,6 +349,7 @@ class ConnectionPool
     private function destroy(object $connection): void
     {
         unset($this->borrowed[spl_object_id($connection)]);
+        unset($this->meta[spl_object_id($connection)]);
         if ($this->destroyer !== null) {
             try {
                 ($this->destroyer)($connection);
@@ -320,5 +361,78 @@ class ConnectionPool
             $this->size--;
         }
         $this->totalDiscarded++;
+    }
+
+    /**
+     * True when the connection has exceeded [[maxLifetime]] and must be
+     * recycled. Always false when maxLifetime is 0 (disabled).
+     */
+    private function isExpired(object $connection): bool
+    {
+        if ($this->maxLifetime <= 0.0) {
+            return false;
+        }
+
+        $created = $this->meta[spl_object_id($connection)]['created'] ?? microtime(true);
+
+        return microtime(true) - $created >= $this->maxLifetime;
+    }
+
+    /**
+     * True when the connection has been idle longer than [[idleTimeout]] and
+     * should be re-validated before reuse. Always false when idleTimeout is 0.
+     */
+    private function isIdleStale(object $connection): bool
+    {
+        if ($this->idleTimeout <= 0.0) {
+            return false;
+        }
+
+        $lastUsed = $this->meta[spl_object_id($connection)]['lastUsed'] ?? microtime(true);
+
+        return microtime(true) - $lastUsed >= $this->idleTimeout;
+    }
+
+    /**
+     * Periodic upkeep, called by the server's pool keeper on a fixed cadence.
+     *
+     * Drains the idle connections, recycles the expired ones and re-validates
+     * the long-idle ones (idle keepalive), then replenishes the idle channel up
+     * to [[minIdle]]. Must run inside a coroutine.
+     *
+     * @return int number of connections recycled (destroyed) during this pass
+     */
+    public function maintain(): int
+    {
+        if ($this->closed) {
+            return 0;
+        }
+
+        $recycled = 0;
+
+        // Drain the idle channel so every idle connection can be inspected
+        // without racing a concurrent borrow.
+        $idle = [];
+        while (($connection = $this->channel->pop(0.001)) !== false) {
+            $idle[] = $connection;
+        }
+
+        foreach ($idle as $connection) {
+            if ($this->isExpired($connection)
+                || ($this->isIdleStale($connection) && !$this->isValid($connection))
+            ) {
+                $this->destroy($connection);
+                $recycled++;
+                continue;
+            }
+            $this->channel->push($connection);
+        }
+
+        // Replenish the idle channel up to the min-idle watermark.
+        while ($this->getIdleCount() < $this->minIdle && $this->size < $this->maxActive) {
+            $this->channel->push($this->create());
+        }
+
+        return $recycled;
     }
 }

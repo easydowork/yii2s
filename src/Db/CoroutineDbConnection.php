@@ -13,6 +13,7 @@ namespace Yii2S\Swoole\Db;
 use Yii2S\Swoole\Coroutine\CoroutineContext;
 use Yii2S\Swoole\Pools\ConnectionPool;
 use Yii2S\Swoole\Pools\HasConnectionPool;
+use Yii2S\Swoole\Resilience\CircuitBreaker;
 use yii\db\Connection;
 
 /**
@@ -52,7 +53,47 @@ class CoroutineDbConnection extends Connection implements HasConnectionPool
      */
     public bool $enableHealthCheck = false;
 
+    /**
+     * @var int minimum idle connections to maintain (0 = no minimum). Enforced
+     * by the server's periodic pool keeper; see [[HttpServer::$poolMaintenanceInterval]].
+     */
+    public int $poolMinIdle = ConnectionPool::DEFAULT_MIN_IDLE;
+
+    /**
+     * @var float recycle connections older than this many seconds (0 = disabled).
+     * Prevents long-lived connections from silently going stale (e.g. MySQL
+     * `wait_timeout`, network changes).
+     */
+    public float $poolMaxLifetime = ConnectionPool::DEFAULT_MAX_LIFETIME;
+
+    /**
+     * @var float re-validate idle connections older than this many seconds
+     * (0 = disabled). Requires [[enableHealthCheck]] to be useful.
+     */
+    public float $poolIdleTimeout = ConnectionPool::DEFAULT_IDLE_TIMEOUT;
+
+    /**
+     * @var bool whether to guard command execution with a circuit breaker: after
+     * [[circuitFailureThreshold]] consecutive connection-loss failures it fails
+     * fast with [[CircuitOpenException]] (or a fallback) for [[circuitCooldown]]
+     * seconds. Only connection-loss errors (SQLSTATE class `08`, or MySQL 2006/
+     * 2013) count; plain SQL errors never trip the circuit.
+     */
+    public bool $enableCircuitBreaker = false;
+
+    /**
+     * @var int consecutive connection-loss failures before the circuit opens
+     */
+    public int $circuitFailureThreshold = 5;
+
+    /**
+     * @var float seconds the circuit stays open before allowing a probe
+     */
+    public float $circuitCooldown = 30.0;
+
     private ?ConnectionPool $pool = null;
+
+    private ?CircuitBreaker $circuitBreaker = null;
 
     /**
      * Connection used outside of a coroutine context (plain CLI usage), where
@@ -89,11 +130,27 @@ class CoroutineDbConnection extends Connection implements HasConnectionPool
                             return false;
                         }
                     }
-                : null
+                : null,
+                $this->poolMinIdle,
+                $this->poolMaxLifetime,
+                $this->poolIdleTimeout
             );
         }
 
         return $this->pool;
+    }
+
+    /**
+     * @return CircuitBreaker|null the configured circuit breaker, or null when
+     * [[enableCircuitBreaker]] is false
+     */
+    public function getCircuitBreaker(): ?CircuitBreaker
+    {
+        if (!$this->enableCircuitBreaker) {
+            return null;
+        }
+
+        return $this->circuitBreaker ??= new CircuitBreaker($this->circuitFailureThreshold, $this->circuitCooldown);
     }
 
     /**

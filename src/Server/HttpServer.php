@@ -61,6 +61,15 @@ class HttpServer extends Component
      */
     public int $prewarmConnections = 0;
 
+    /**
+     * @var float seconds between connection-pool upkeep passes (max-lifetime
+     * recycling, idle keepalive, min-idle replenishment). 0 disables the
+     * periodic keeper; the pools then only recycle on borrow/return. Only
+     * meaningful together with a component's `poolMinIdle` / `poolMaxLifetime`
+     * / `poolIdleTimeout` settings.
+     */
+    public float $poolMaintenanceInterval = 0.0;
+
     /** @var RequestDispatcherInterface|array|string */
     public $dispatcher;
 
@@ -203,6 +212,7 @@ class HttpServer extends Component
 
         $dispatcher = $this->dispatcher;
         $prewarm = $this->prewarmConnections;
+        $maintenanceInterval = $this->poolMaintenanceInterval;
 
         // Every request runs inside a coroutine (Swoole enables this by
         // default); the dispatcher therefore keeps working unchanged.
@@ -215,13 +225,25 @@ class HttpServer extends Component
         // loop needs a coroutine; workerStart runs outside one. The warm-up is
         // best-effort and asynchronous: the worker serves requests immediately
         // and pays the connect latency only if the warm-up has not finished.
-        $server->on('workerStart', static function () use ($dispatcher, $prewarm): void {
-            if ($prewarm <= 0) {
-                return;
+        $server->on('workerStart', static function () use ($dispatcher, $prewarm, $maintenanceInterval): void {
+            if ($prewarm > 0) {
+                \Swoole\Coroutine::create(static function () use ($dispatcher, $prewarm): void {
+                    $dispatcher->prewarm($prewarm);
+                });
             }
-            \Swoole\Coroutine::create(static function () use ($dispatcher, $prewarm): void {
-                $dispatcher->prewarm($prewarm);
-            });
+
+            if ($maintenanceInterval > 0) {
+                // Periodic pool upkeep (max-lifetime recycling, idle keepalive,
+                // min-idle replenishment). Runs forever alongside the worker;
+                // the worker shuts it down on exit.
+                \Swoole\Coroutine::create(static function () use ($dispatcher, $maintenanceInterval): void {
+                    // @phpstan-ignore-next-line intentional infinite loop, runs until the worker exits
+                    while (true) {
+                        \Swoole\Coroutine::sleep($maintenanceInterval);
+                        $dispatcher->maintainPools();
+                    }
+                });
+            }
         });
 
         if ($this->watch) {

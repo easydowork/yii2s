@@ -16,6 +16,7 @@
     <testsuites>
         <testsuite name="Yii2S Swoole Test Suite">
             <directory>./tests/pools</directory>
+            <directory>./tests/resilience</directory>
             <directory>./tests/db</directory>
             <directory>./tests/framework</directory>
             <directory>./tests/redis</directory>

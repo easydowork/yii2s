@@ -12,6 +12,9 @@ namespace yii2stest\db;
 
 use yii2stest\DatabaseTestCase;
 use Yii2S\Swoole\Db\CoroutineCommand;
+use Yii2S\Swoole\Db\CoroutineDbConnection;
+use Yii2S\Swoole\Resilience\CircuitBreaker;
+use Yii2S\Swoole\Resilience\CircuitOpenException;
 
 /**
  * @group db
@@ -102,6 +105,38 @@ class CoroutineCommandTest extends DatabaseTestCase
             // The next request transparently opens a fresh connection.
             $this->assertSame('1', (string) $db->createCommand('SELECT 1')->queryScalar());
             $this->assertSame(1, $db->getPool()->getSize(), 'a replacement connection is created');
+        });
+    }
+
+    public function testCircuitBreakerOpensWhenDatabaseIsUnreachable(): void
+    {
+        $db = \Yii::createObject([
+            'class' => CoroutineDbConnection::class,
+            'dsn' => 'mysql:host=127.0.0.1;port=1;dbname=irrelevant',
+            'username' => 'root',
+            'password' => 'root',
+            'enableCircuitBreaker' => true,
+            'circuitFailureThreshold' => 2,
+            'circuitCooldown' => 30.0,
+        ]);
+
+        $this->runInCoroutine(function () use ($db): void {
+            // Two unreachable queries trip the circuit.
+            for ($i = 0; $i < 2; $i++) {
+                try {
+                    $db->createCommand('SELECT 1')->queryScalar();
+                    $this->fail('expected a connection failure');
+                } catch (\yii\db\Exception) {
+                }
+            }
+
+            $breaker = $db->getCircuitBreaker();
+            $this->assertNotNull($breaker);
+            $this->assertSame(CircuitBreaker::STATE_OPEN, $breaker->getState());
+
+            // The third query fails fast instead of trying to connect again.
+            $this->expectException(CircuitOpenException::class);
+            $db->createCommand('SELECT 1')->queryScalar();
         });
     }
 }

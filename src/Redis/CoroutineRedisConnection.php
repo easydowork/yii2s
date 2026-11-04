@@ -13,6 +13,7 @@ namespace Yii2S\Swoole\Redis;
 use Yii2S\Swoole\Coroutine\CoroutineContext;
 use Yii2S\Swoole\Pools\ConnectionPool;
 use Yii2S\Swoole\Pools\HasConnectionPool;
+use Yii2S\Swoole\Resilience\CircuitBreaker;
 use yii\base\Component;
 
 /**
@@ -91,9 +92,45 @@ class CoroutineRedisConnection extends Component implements HasConnectionPool
      */
     public bool $enableHealthCheck = false;
 
+    /**
+     * @var int minimum idle connections to maintain (0 = no minimum). Enforced
+     * by the server's periodic pool keeper; see [[HttpServer::$poolMaintenanceInterval]].
+     */
+    public int $poolMinIdle = ConnectionPool::DEFAULT_MIN_IDLE;
+
+    /**
+     * @var float recycle connections older than this many seconds (0 = disabled)
+     */
+    public float $poolMaxLifetime = ConnectionPool::DEFAULT_MAX_LIFETIME;
+
+    /**
+     * @var float re-validate idle connections older than this many seconds
+     * (0 = disabled). Requires [[enableHealthCheck]] to be useful.
+     */
+    public float $poolIdleTimeout = ConnectionPool::DEFAULT_IDLE_TIMEOUT;
+
+    /**
+     * @var bool whether to guard connection acquisition with a circuit breaker:
+     * after [[circuitFailureThreshold]] consecutive failures it fails fast with
+     * [[CircuitOpenException]] (or a fallback) for [[circuitCooldown]] seconds.
+     */
+    public bool $enableCircuitBreaker = false;
+
+    /**
+     * @var int consecutive failures before the circuit opens
+     */
+    public int $circuitFailureThreshold = 5;
+
+    /**
+     * @var float seconds the circuit stays open before allowing a probe
+     */
+    public float $circuitCooldown = 30.0;
+
     private ?ConnectionPool $pool = null;
 
     private ?\Redis $sharedConnection = null;
+
+    private ?CircuitBreaker $circuitBreaker = null;
 
     private const CONTEXT_KEY_PREFIX = 'yii2s.redis.connection.';
 
@@ -118,7 +155,10 @@ class CoroutineRedisConnection extends Component implements HasConnectionPool
                             return false;
                         }
                     }
-                : null
+                : null,
+                $this->poolMinIdle,
+                $this->poolMaxLifetime,
+                $this->poolIdleTimeout
             );
         }
 
@@ -143,10 +183,26 @@ class CoroutineRedisConnection extends Component implements HasConnectionPool
             return $connection;
         }
 
-        $connection = $this->getPool()->borrow();
+        $breaker = $this->getCircuitBreaker();
+        $connection = $breaker !== null
+            ? $breaker->call(fn (): \Redis => $this->getPool()->borrow())
+            : $this->getPool()->borrow();
         CoroutineContext::set($key, $connection);
 
         return $connection;
+    }
+
+    /**
+     * @return CircuitBreaker|null the configured circuit breaker, or null when
+     * [[enableCircuitBreaker]] is false
+     */
+    public function getCircuitBreaker(): ?CircuitBreaker
+    {
+        if (!$this->enableCircuitBreaker) {
+            return null;
+        }
+
+        return $this->circuitBreaker ??= new CircuitBreaker($this->circuitFailureThreshold, $this->circuitCooldown);
     }
 
     /**
