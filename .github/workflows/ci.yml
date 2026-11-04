@@ -46,19 +46,21 @@ jobs:
         uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
-          extensions: pdo_mysql, redis, mbstring
+          # pcntl/posix are required by the multi-process Swoole\Http\Server
+          # (SWOOLE_PROCESS) used by the integration tests.
+          extensions: pdo_mysql, redis, mbstring, pcntl, posix
           coverage: none
 
       - name: Install Swoole (pecl)
-        # Self-managed pecl install instead of setup-php's "swoole"
-        # extension key: that path silently skips the extension when its
-        # build fails, and composer's platform check then blows up two
-        # steps later. This mirrors the verified local WSL recipe.
+        # Self-managed pecl install instead of setup-php's "swoole" extension
+        # key: that path silently skips the extension when its build fails, and
+        # composer's platform check then blows up two steps later. Pin to the
+        # 6.x line so a future Swoole 7 does not silently break the matrix.
         run: |
           set -e
           sudo apt-get update
           sudo apt-get install -y libbrotli-dev libssl-dev zlib1g-dev pkg-config
-          yes '' | sudo pecl install swoole
+          yes '' | sudo pecl install swoole-6.2.4
           echo "extension=swoole.so" | sudo tee /etc/php/${{ matrix.php }}/mods-available/swoole.ini
           sudo phpenmod -v ${{ matrix.php }} swoole
           php -m | grep -i swoole
@@ -68,6 +70,71 @@ jobs:
 
       - name: Run tests
         run: vendor/bin/phpunit --no-coverage --verbose
+
+  smoke:
+    name: Blog demo smoke (end-to-end)
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: blog
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_mysql, redis, mbstring, pcntl, posix
+          coverage: none
+
+      - name: Install Swoole (pecl)
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y libbrotli-dev libssl-dev zlib1g-dev pkg-config
+          yes '' | sudo pecl install swoole-6.2.4
+          echo "extension=swoole.so" | sudo tee /etc/php/8.4/mods-available/swoole.ini
+          sudo phpenmod -v 8.4 swoole
+          php -m | grep -i swoole
+
+      - name: Install main package
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Install blog demo
+        # The blog demo resolves easydowork/yii2s via a path repository symlink
+        # to the checkout root, so the main package must be installed first.
+        run: composer install --prefer-dist --no-interaction --no-progress
+        working-directory: examples/blog
+
+      - name: Run smoke test
+        # smoke.sh boots the coroutine server and exercises every feature:
+        # MVC, error page, REST API, session+CSRF, upload+static, CSV download,
+        # queue worker and a concurrency burst. CLI=php overrides its default
+        # swoole-cli for the CI environment.
+        run: CLI=php bash scripts/smoke.sh
+        working-directory: examples/blog
 
   static:
     name: PHPStan
