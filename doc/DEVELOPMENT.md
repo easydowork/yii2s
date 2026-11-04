@@ -664,7 +664,7 @@ Linux 生产环境的基准待上线后另行实测（多进程模型与 macOS �
 
 ## 5.1 测试体系
 
-208 tests / 849 assertions（2 skipped），覆盖十五个目录：连接池并发（借还配对/超时/sweep/健康机制）、
+210 tests / 851 assertions（2 skipped），覆盖十五个目录：连接池并发（借还配对/超时/sweep/健康机制）、
 请求适配（头/cookie 签名/上传三种形状）、服务器集成（**真实 socket 交互，非 mock**：
 CSRF 全流程、表单三件套、静态文件、优雅停机、watch 热重载）、DB（事务含嵌套
 savepoint、并发 AR + 并发事务、Query::batch、协程外 detached 直连）、Redis
@@ -677,7 +677,7 @@ savepoint、并发 AR + 并发事务、Query::batch、协程外 detached 直连�
 
 | 运行时 | 测试 | 用途 |
 |---|---|---|
-| macOS + swoole-cli 6.2.0 / PHP 8.4 | 208/849 ✅（2 skipped） | 全套集成测试（真实 socket、优雅停机、watch、pid）+ PHPStan + cs |
+| macOS + swoole-cli 6.2.0 / PHP 8.4 | 210/851 ✅（2 skipped） | 全套集成测试（真实 socket、优雅停机、watch、pid）+ PHPStan + cs |
 | macOS + swoole-cli（进程级 e2e / 基准） | e2e 13 checks / 21769-6790-7459 QPS | start/status/reload respawn/SIGTERM 全过；`/`、`/demo/db`、`/demo/redis`（50 并发 3s，0 错误、池零超时） |
 | Linux + swoole-cli 6.2.2 | 167/741 ✅ | 端到端（start/status/reload respawn/SIGTERM）+ 基准 |
 | Linux + pecl PHP 8.5 / swoole 6.2.4 | 167/741 ✅ | **CI 同源标准构建**（`http_parse_files` 修复的实战检验） |

@@ -31,4 +31,13 @@ class RateLimiterTest extends TestCase
             $this->assertSame(0, $limiter->remaining($key, 2));
         });
     }
+
+    public function testInvalidLimitThrows(): void
+    {
+        $redis = new CoroutineRedisConnection(['hostname' => '127.0.0.1', 'port' => 6379]);
+        $limiter = new RateLimiter($redis, 'yii2s:test:ratelimit:');
+
+        $this->expectException(\InvalidArgumentException::class);
+        $limiter->allow('test', 0, 60);
+    }
 }

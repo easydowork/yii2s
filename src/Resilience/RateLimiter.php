@@ -36,6 +36,10 @@ class RateLimiter
      */
     public function allow(string $key, int $limit, int $windowSeconds): bool
     {
+        if ($limit < 1 || $windowSeconds < 1) {
+            throw new \InvalidArgumentException('Rate limit and window seconds must be at least 1.');
+        }
+
         $redisKey = $this->prefix . $key;
         $count = (int) $this->redis->executeCommand('INCR', [$redisKey]);
 

@@ -53,9 +53,19 @@ final class MetricsMiddleware implements Middleware
         if ($response->isWritable()) {
             $response->status(200);
             $response->header('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
-            $body = $this->aggregator !== null
-                ? $this->aggregator->render($this->requestMetrics, $pools)
-                : $this->requestMetrics->render($pools);
+
+            if ($this->aggregator !== null) {
+                try {
+                    $body = $this->aggregator->render($this->requestMetrics, $pools);
+                } catch (Throwable) {
+                    // Degraded: the shared store is unavailable, fall back to
+                    // this worker's metrics instead of failing the scrape.
+                    $body = $this->requestMetrics->render($pools);
+                }
+            } else {
+                $body = $this->requestMetrics->render($pools);
+            }
+
             $response->end($body);
         }
 

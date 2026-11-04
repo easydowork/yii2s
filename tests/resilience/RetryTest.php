@@ -61,4 +61,10 @@ class RetryTest extends TestCase
 
         $this->assertSame(3, $attempts);
     }
+
+    public function testInvalidMaxAttemptsThrows(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        (new Retry())->call(fn (): string => 'x', 0);
+    }
 }

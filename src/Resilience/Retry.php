@@ -34,6 +34,12 @@ class Retry
         float $baseDelaySeconds = 0.1,
         float $maxDelaySeconds = 5.0,
     ): mixed {
+        if ($maxAttempts < 1) {
+            throw new \InvalidArgumentException('maxAttempts must be at least 1.');
+        }
+        $baseDelaySeconds = max(0.0, $baseDelaySeconds);
+        $maxDelaySeconds = max(0.0, $maxDelaySeconds);
+
         $attempt = 0;
 
         while (true) {
