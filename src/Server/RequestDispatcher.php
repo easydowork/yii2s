@@ -163,6 +163,11 @@ class RequestDispatcher implements RequestDispatcherInterface
         return $this->rawRoutes;
     }
 
+    public function getAppConfig(): ?string
+    {
+        return $this->appConfig;
+    }
+
     /**
      * @return RequestMetrics the request metrics collector (for tests/inspection)
      */

@@ -37,4 +37,17 @@ interface RequestDispatcherInterface
      * @return int total number of connections recycled during this pass
      */
     public function maintainPools(): int;
+
+    /**
+     * Returns the registered raw routes, keyed by `METHOD path`.
+     *
+     * @return array<string, callable>
+     */
+    public function getRawRoutes(): array;
+
+    /**
+     * Returns the web application config file path, or null when the dispatcher
+     * is not file-based.
+     */
+    public function getAppConfig(): ?string;
 }
