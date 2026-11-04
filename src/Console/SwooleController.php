@@ -493,6 +493,46 @@ class SwooleController extends Controller
         return floor($seconds / 3600) . 'h' . floor(($seconds % 3600) / 60) . 'm';
     }
 
+    /**
+     * Lists the routes served by this server: the raw routes registered on the
+     * dispatcher and the urlManager rules from the application config.
+     */
+    public function actionRoutes(): int
+    {
+        $server = $this->resolveServer(false);
+        if ($server === null) {
+            return ExitCode::UNSPECIFIED_ERROR;
+        }
+
+        $dispatcher = $server->dispatcher;
+        if (!$dispatcher instanceof \Yii2S\Swoole\Server\RequestDispatcher) {
+            $this->stdout("Dispatcher is not introspectable.\n");
+            return ExitCode::OK;
+        }
+
+        $rawRoutes = $dispatcher->getRawRoutes();
+        if ($rawRoutes !== []) {
+            $this->stdout("Raw routes:\n");
+            foreach ($rawRoutes as $key => $_handler) {
+                $this->stdout("  {$key}\n");
+            }
+        }
+
+        $configFile = $dispatcher->appConfig;
+        if (is_string($configFile) && is_file($configFile)) {
+            $config = require $configFile;
+            $rules = is_array($config) ? ($config['components']['urlManager']['rules'] ?? []) : [];
+            if (is_array($rules) && $rules !== []) {
+                $this->stdout("\nurlManager rules:\n");
+                foreach ($rules as $pattern => $route) {
+                    $this->stdout(sprintf("  %-40s => %s\n", (string) $pattern, (string) $route));
+                }
+            }
+        }
+
+        return ExitCode::OK;
+    }
+
     protected function resolveServer(bool $ensure = true): ?HttpServer
     {
         if ($this->server !== null) {
