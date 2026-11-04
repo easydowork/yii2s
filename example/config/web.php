@@ -95,6 +95,9 @@ return [
             'dispatcher' => (new \Yii2S\Swoole\Server\RequestDispatcher(__DIR__ . '/web.php', [
                 'enablePoolMetricsEndpoint' => true,
                 'enableMetricsEndpoint' => true,
+                // Aggregate /metrics across all workers via Redis.
+                'enableMetricsAggregation' => true,
+                'metricsAggregationRedis' => 'redis',
             ]))
                 // Raw route: answered without creating the Yii request/response
                 // objects - use it for health checks / tiny stateless APIs.
