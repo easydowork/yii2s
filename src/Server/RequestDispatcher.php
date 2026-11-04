@@ -11,6 +11,7 @@ declare(strict_types=1);
 namespace Yii2S\Swoole\Server;
 
 use Yii2S\Swoole\Pools\PoolMetricsCollector;
+use Yii2S\Swoole\Redis\CoroutineRedisConnection;
 use Yii2S\Swoole\Runtime\CoroutineApplication;
 use Yii2S\Swoole\Runtime\CoroutineRequest;
 use Yii2S\Swoole\Runtime\CoroutineResponse;
@@ -27,6 +28,7 @@ use Swoole\Http\Response;
 use Throwable;
 use Yii;
 use yii\base\InvalidConfigException;
+use yii\di\Instance;
 use yii\web\Application as WebApplication;
 
 /**
@@ -75,6 +77,18 @@ class RequestDispatcher implements RequestDispatcherInterface
      */
     public string $metricsPath = '/metrics';
 
+    /**
+     * @var bool whether to aggregate `/metrics` across all workers (via Redis)
+     * instead of reporting only the worker that serves the scrape request.
+     */
+    public bool $enableMetricsAggregation = false;
+
+    /**
+     * @var string application component id of the Redis connection used for
+     * metrics aggregation (see [[enableMetricsAggregation]])
+     */
+    public string $metricsAggregationRedis = 'redis';
+
     private ?WebApplication $application = null;
 
     /**
@@ -109,6 +123,10 @@ class RequestDispatcher implements RequestDispatcherInterface
         $this->enableMetricsEndpoint = (bool) ($config['enableMetricsEndpoint'] ?? $this->enableMetricsEndpoint);
         if (isset($config['metricsPath']) && is_string($config['metricsPath'])) {
             $this->metricsPath = $config['metricsPath'];
+        }
+        $this->enableMetricsAggregation = (bool) ($config['enableMetricsAggregation'] ?? $this->enableMetricsAggregation);
+        if (isset($config['metricsAggregationRedis']) && is_string($config['metricsAggregationRedis'])) {
+            $this->metricsAggregationRedis = $config['metricsAggregationRedis'];
         }
         $this->responseSender = $config['responseSender'] ?? new SwooleResponseSender();
         $this->stateManager = $config['stateManager'] ?? new RequestStateManager();
@@ -174,12 +192,20 @@ class RequestDispatcher implements RequestDispatcherInterface
                     $this->enableMetricsEndpoint,
                     $this->metricsPath,
                     fn (): array => PoolMetricsCollector::collect($this->getApplication()),
-                    $this->requestMetrics
+                    $this->requestMetrics,
+                    $this->enableMetricsAggregation ? $this->getMetricsAggregator() : null
                 ),
             ];
         }
 
         return $this->middlewareChain;
+    }
+
+    private function getMetricsAggregator(): MetricsAggregator
+    {
+        return new MetricsAggregator(
+            Instance::ensure($this->metricsAggregationRedis, CoroutineRedisConnection::class)
+        );
     }
 
     public function dispatch(Request $swooleRequest, Response $swooleResponse, SwooleHttpServer $server): void

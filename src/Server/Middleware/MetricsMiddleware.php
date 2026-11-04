@@ -14,6 +14,7 @@ use Swoole\Http\Request;
 use Swoole\Http\Response;
 use Throwable;
 use Yii2S\Swoole\Pools\ConnectionPool;
+use Yii2S\Swoole\Server\MetricsAggregator;
 use Yii2S\Swoole\Server\RequestMetrics;
 
 /**
@@ -30,6 +31,7 @@ final class MetricsMiddleware implements Middleware
         private string $path,
         private \Closure $poolCollector,
         private RequestMetrics $requestMetrics,
+        private ?MetricsAggregator $aggregator = null,
     ) {
     }
 
@@ -51,7 +53,10 @@ final class MetricsMiddleware implements Middleware
         if ($response->isWritable()) {
             $response->status(200);
             $response->header('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
-            $response->end($this->requestMetrics->render($pools));
+            $body = $this->aggregator !== null
+                ? $this->aggregator->render($this->requestMetrics, $pools)
+                : $this->requestMetrics->render($pools);
+            $response->end($body);
         }
 
         return true;

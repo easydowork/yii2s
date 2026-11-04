@@ -17,6 +17,9 @@ namespace Yii2S\Swoole\Server;
  * Counters are plain PHP arrays: Swoole coroutines only switch at I/O yield
  * points and never between the opcodes of a single increment, so the
  * read-modify-write here is safe without locks.
+ *
+ * Each worker keeps its own instance; [[MetricsAggregator]] merges them across
+ * workers through a shared store so `/metrics` can report the whole server.
  */
 class RequestMetrics
 {
@@ -58,52 +61,76 @@ class RequestMetrics
     }
 
     /**
-     * Renders the full Prometheus text exposition: HTTP request metrics,
-     * connection pool metrics and process metrics.
+     * Exports the per-worker HTTP counters so they can be merged across
+     * workers by [[MetricsAggregator]].
+     *
+     * @return array{byMethod: array, inProgress: int}
+     */
+    public function snapshot(): array
+    {
+        return ['byMethod' => $this->byMethod, 'inProgress' => $this->inProgress];
+    }
+
+    /**
+     * Renders this worker's metrics (no cross-worker aggregation).
      *
      * @param array<string, array<string, int|bool>> $pools pool metrics keyed by pool id
      */
     public function render(array $pools = []): string
     {
-        return $this->renderHttpMetrics() . $this->renderPoolMetrics($pools) . $this->renderProcessMetrics();
+        return $this->renderHttp($this->byMethod, $this->inProgress)
+            . $this->renderPoolMetrics($pools)
+            . $this->renderProcess();
     }
 
-    private function renderHttpMetrics(): string
+    /**
+     * Renders an aggregated snapshot produced by [[MetricsAggregator]].
+     *
+     * @param array{byMethod?: array, inProgress?: int, memory?: array<int, int>, coroutines?: int, pools?: array} $aggregate
+     */
+    public function renderAggregate(array $aggregate): string
+    {
+        return $this->renderHttp($aggregate['byMethod'] ?? [], (int) ($aggregate['inProgress'] ?? 0))
+            . $this->renderPoolMetrics($aggregate['pools'] ?? [])
+            . $this->renderProcessAggregate($aggregate['memory'] ?? [], (int) ($aggregate['coroutines'] ?? 0));
+    }
+
+    /**
+     * @param array<string, array<string, mixed>> $byMethod
+     */
+    private function renderHttp(array $byMethod, int $inProgress): string
     {
         $out = "# HELP yii2s_http_requests_total Total HTTP requests handled.\n"
             . "# TYPE yii2s_http_requests_total counter\n";
-        foreach ($this->byMethod as $method => $m) {
+        foreach ($byMethod as $method => $m) {
             foreach ($m['statuses'] as $status => $count) {
-                $out .= sprintf("yii2s_http_requests_total{method=\"%s\",status=\"%d\"} %d\n", $method, $status, $count);
+                $out .= sprintf("yii2s_http_requests_total{method=\"%s\",status=\"%d\"} %d\n", $method, (int) $status, (int) $count);
             }
         }
 
         $out .= "# HELP yii2s_http_request_duration_seconds HTTP request duration in seconds.\n"
             . "# TYPE yii2s_http_request_duration_seconds histogram\n";
-        foreach ($this->byMethod as $method => $m) {
-            // Each bucket already holds the cumulative count (record() adds
-            // every request to all buckets whose upper bound it fits), so the
-            // values are emitted as-is.
+        foreach ($byMethod as $method => $m) {
             foreach (self::LATENCY_BUCKETS as $i => $upper) {
                 $out .= sprintf(
                     "yii2s_http_request_duration_seconds_bucket{method=\"%s\",le=\"%s\"} %d\n",
                     $method,
                     (string) $upper,
-                    $m['buckets'][$i] ?? 0
+                    (int) ($m['buckets'][$i] ?? 0)
                 );
             }
             $out .= sprintf(
                 "yii2s_http_request_duration_seconds_bucket{method=\"%s\",le=\"+Inf\"} %d\n",
                 $method,
-                $m['count']
+                (int) ($m['count'] ?? 0)
             );
-            $out .= sprintf("yii2s_http_request_duration_seconds_sum{method=\"%s\"} %.6f\n", $method, $m['sum']);
-            $out .= sprintf("yii2s_http_request_duration_seconds_count{method=\"%s\"} %d\n", $method, $m['count']);
+            $out .= sprintf("yii2s_http_request_duration_seconds_sum{method=\"%s\"} %.6f\n", $method, (float) ($m['sum'] ?? 0.0));
+            $out .= sprintf("yii2s_http_request_duration_seconds_count{method=\"%s\"} %d\n", $method, (int) ($m['count'] ?? 0));
         }
 
         $out .= "# HELP yii2s_http_requests_in_progress Currently handled requests.\n"
             . "# TYPE yii2s_http_requests_in_progress gauge\n"
-            . sprintf("yii2s_http_requests_in_progress %d\n", $this->inProgress);
+            . sprintf("yii2s_http_requests_in_progress %d\n", $inProgress);
 
         return $out;
     }
@@ -141,15 +168,58 @@ class RequestMetrics
         return $out;
     }
 
-    private function renderProcessMetrics(): string
+    /**
+     * Per-worker process metrics (no cross-worker aggregation).
+     */
+    private function renderProcess(): string
     {
         $stats = \Swoole\Coroutine::stats();
 
-        return "# HELP yii2s_process_memory_bytes Memory currently allocated by the process.\n"
+        $out = "# HELP yii2s_process_memory_bytes Memory currently allocated by the process.\n"
             . "# TYPE yii2s_process_memory_bytes gauge\n"
             . sprintf("yii2s_process_memory_bytes %d\n", memory_get_usage(true))
             . "# HELP yii2s_process_coroutines Number of active coroutines.\n"
             . "# TYPE yii2s_process_coroutines gauge\n"
             . sprintf("yii2s_process_coroutines %d\n", $stats['coroutine_num'] ?? 0);
+
+        $load = function_exists('sys_getloadavg') ? sys_getloadavg() : false;
+        if (is_array($load)) {
+            $out .= "# HELP yii2s_process_load_average System load average (1/5/15 minutes).\n"
+                . "# TYPE yii2s_process_load_average gauge\n"
+                . sprintf("yii2s_process_load_average{window=\"1m\"} %.2f\n", (float) $load[0])
+                . sprintf("yii2s_process_load_average{window=\"5m\"} %.2f\n", (float) $load[1])
+                . sprintf("yii2s_process_load_average{window=\"15m\"} %.2f\n", (float) $load[2]);
+        }
+
+        return $out;
+    }
+
+    /**
+     * Cross-worker process metrics: per-worker memory + total coroutines.
+     *
+     * @param array<int, int> $memory worker id => memory bytes
+     */
+    private function renderProcessAggregate(array $memory, int $coroutines): string
+    {
+        $out = "# HELP yii2s_process_memory_bytes Memory currently allocated by a worker.\n"
+            . "# TYPE yii2s_process_memory_bytes gauge\n";
+        foreach ($memory as $workerId => $bytes) {
+            $out .= sprintf("yii2s_process_memory_bytes{worker=\"%d\"} %d\n", (int) $workerId, (int) $bytes);
+        }
+
+        $out .= "# HELP yii2s_process_coroutines Number of active coroutines.\n"
+            . "# TYPE yii2s_process_coroutines gauge\n"
+            . sprintf("yii2s_process_coroutines %d\n", $coroutines);
+
+        $load = function_exists('sys_getloadavg') ? sys_getloadavg() : false;
+        if (is_array($load)) {
+            $out .= "# HELP yii2s_process_load_average System load average (1/5/15 minutes).\n"
+                . "# TYPE yii2s_process_load_average gauge\n"
+                . sprintf("yii2s_process_load_average{window=\"1m\"} %.2f\n", (float) $load[0])
+                . sprintf("yii2s_process_load_average{window=\"5m\"} %.2f\n", (float) $load[1])
+                . sprintf("yii2s_process_load_average{window=\"15m\"} %.2f\n", (float) $load[2]);
+        }
+
+        return $out;
     }
 }

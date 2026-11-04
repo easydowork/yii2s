@@ -10,6 +10,8 @@ declare(strict_types=1);
 
 namespace yii2stest\server;
 
+use Yii2S\Swoole\Redis\CoroutineRedisConnection;
+use Yii2S\Swoole\Server\MetricsAggregator;
 use Yii2S\Swoole\Server\RequestMetrics;
 use yii2stest\ServerTestCase;
 
@@ -84,6 +86,30 @@ class RequestMetricsTest extends ServerTestCase
             } finally {
                 $this->stopServer();
             }
+        });
+    }
+
+    public function testAggregatorMergesWorkerSnapshots(): void
+    {
+        $redis = new CoroutineRedisConnection(['hostname' => '127.0.0.1', 'port' => 6379]);
+        $aggregator = new MetricsAggregator($redis, 'yii2s:test:metrics:');
+
+        $this->runInCoroutine(function () use ($redis, $aggregator): void {
+            foreach ($redis->keys('yii2s:test:metrics:*') as $key) {
+                $redis->del($key);
+            }
+
+            $metrics = new RequestMetrics();
+            $metrics->beginRequest();
+            $metrics->record(0.01, 200, 'GET');
+
+            $out = $aggregator->render($metrics, [
+                'db' => ['size' => 1, 'idle' => 1, 'active' => 0, 'waiting' => 0, 'total_created' => 1, 'total_borrowed' => 1, 'total_timeouts' => 0, 'total_discarded' => 0],
+            ]);
+
+            $this->assertStringContainsString('yii2s_http_requests_total{method="GET",status="200"} 1', $out);
+            $this->assertStringContainsString('yii2s_process_memory_bytes{worker="', $out);
+            $this->assertStringContainsString('yii2s_pool_size{pool="db"} 1', $out);
         });
     }
 }
