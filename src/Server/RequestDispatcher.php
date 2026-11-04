@@ -537,18 +537,28 @@ class RequestDispatcher implements RequestDispatcherInterface
         }
 
         $status = $this->resolveStatusCode($exception);
-        $swooleResponse->status($status);
-        $swooleResponse->header('Content-Type', 'text/plain; charset=UTF-8');
 
-        if (YII_DEBUG) {
-            $body = 'Error: ' . $exception->getMessage() . "\n\n"
-                . 'Coroutine ID: ' . \Swoole\Coroutine::getCid() . "\n\n"
-                . $exception->getTraceAsString();
-        } else {
-            $body = 'Internal Server Error';
+        // The fallback itself must never throw: the response may already have
+        // been partially written by a failed render above, in which case there
+        // is nothing left to do but let the connection close.
+        try {
+            if ($swooleResponse->isWritable()) {
+                $swooleResponse->status($status);
+                $swooleResponse->header('Content-Type', 'text/plain; charset=UTF-8');
+
+                if (YII_DEBUG) {
+                    $body = 'Error: ' . $exception->getMessage() . "\n\n"
+                        . 'Coroutine ID: ' . \Swoole\Coroutine::getCid() . "\n\n"
+                        . $exception->getTraceAsString();
+                } else {
+                    $body = 'Internal Server Error';
+                }
+
+                $swooleResponse->end($body);
+            }
+        } catch (Throwable) {
+            // Best effort failed; nothing more to do.
         }
-
-        $swooleResponse->end($body);
 
         return $status;
     }
