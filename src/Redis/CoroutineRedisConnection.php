@@ -13,7 +13,7 @@ namespace Yii2S\Swoole\Redis;
 use Yii2S\Swoole\Coroutine\CoroutineContext;
 use Yii2S\Swoole\Pools\ConnectionPool;
 use Yii2S\Swoole\Pools\HasConnectionPool;
-use Yii2S\Swoole\Resilience\CircuitBreaker;
+use Yii2S\Swoole\Pools\PooledConnectionTrait;
 use yii\base\Component;
 
 /**
@@ -56,6 +56,8 @@ use yii\base\Component;
  */
 class CoroutineRedisConnection extends Component implements HasConnectionPool
 {
+    use PooledConnectionTrait;
+
     public string $hostname = '127.0.0.1';
 
     public int $port = 6379;
@@ -77,60 +79,7 @@ class CoroutineRedisConnection extends Component implements HasConnectionPool
      */
     public float $dataTimeout = 3.0;
 
-    public int $poolMaxActive = ConnectionPool::DEFAULT_MAX_ACTIVE;
-
-    public float $poolWaitTimeout = ConnectionPool::DEFAULT_WAIT_TIMEOUT;
-
-    /**
-     * @var bool whether to borrow a dedicated connection per coroutine.
-     * Disable to use a single shared connection for debugging.
-     */
-    public bool $enableCoroutinePooling = true;
-
-    /**
-     * @var bool whether idle connections are validated with `PING` before reuse
-     */
-    public bool $enableHealthCheck = false;
-
-    /**
-     * @var int minimum idle connections to maintain (0 = no minimum). Enforced
-     * by the server's periodic pool keeper; see [[HttpServer::$poolMaintenanceInterval]].
-     */
-    public int $poolMinIdle = ConnectionPool::DEFAULT_MIN_IDLE;
-
-    /**
-     * @var float recycle connections older than this many seconds (0 = disabled)
-     */
-    public float $poolMaxLifetime = ConnectionPool::DEFAULT_MAX_LIFETIME;
-
-    /**
-     * @var float re-validate idle connections older than this many seconds
-     * (0 = disabled). Requires [[enableHealthCheck]] to be useful.
-     */
-    public float $poolIdleTimeout = ConnectionPool::DEFAULT_IDLE_TIMEOUT;
-
-    /**
-     * @var bool whether to guard connection acquisition with a circuit breaker:
-     * after [[circuitFailureThreshold]] consecutive failures it fails fast with
-     * [[CircuitOpenException]] (or a fallback) for [[circuitCooldown]] seconds.
-     */
-    public bool $enableCircuitBreaker = false;
-
-    /**
-     * @var int consecutive failures before the circuit opens
-     */
-    public int $circuitFailureThreshold = 5;
-
-    /**
-     * @var float seconds the circuit stays open before allowing a probe
-     */
-    public float $circuitCooldown = 30.0;
-
-    private ?ConnectionPool $pool = null;
-
     private ?\Redis $sharedConnection = null;
-
-    private ?CircuitBreaker $circuitBreaker = null;
 
     private const CONTEXT_KEY_PREFIX = 'yii2s.redis.connection.';
 
@@ -190,19 +139,6 @@ class CoroutineRedisConnection extends Component implements HasConnectionPool
     }
 
     /**
-     * @return CircuitBreaker|null the configured circuit breaker, or null when
-     * [[enableCircuitBreaker]] is false
-     */
-    public function getCircuitBreaker(): ?CircuitBreaker
-    {
-        if (!$this->enableCircuitBreaker) {
-            return null;
-        }
-
-        return $this->circuitBreaker ??= new CircuitBreaker($this->circuitFailureThreshold, $this->circuitCooldown);
-    }
-
-    /**
      * Executes a Redis command on the coroutine-bound connection.
      *
      * @param string $name command name, e.g. `GET`, `SET`, `SETEX`
@@ -221,28 +157,6 @@ class CoroutineRedisConnection extends Component implements HasConnectionPool
         }
 
         return $breaker->call(fn (): mixed => $this->executeCommandInternal($name, $params));
-    }
-
-    /**
-     * Executes a Redis command on the coroutine-bound connection.
-     */
-    private function executeCommandInternal(string $name, array $params = []): mixed
-    {
-        $connection = $this->borrow();
-        $method = strtolower($name);
-
-        try {
-            return $connection->{$method}(...$params);
-        } catch (\RedisException $e) {
-            // The connection is broken: drop it from the coroutine binding and
-            // the pool so the next call creates a fresh one.
-            $this->releaseCurrent(true);
-            throw new \RuntimeException(sprintf(
-                'Redis command "%s" failed: %s',
-                $name,
-                $e->getMessage()
-            ), 0, $e);
-        }
     }
 
     /**
@@ -293,6 +207,28 @@ class CoroutineRedisConnection extends Component implements HasConnectionPool
     public function __call($name, $params)
     {
         return $this->executeCommand($name, $params);
+    }
+
+    /**
+     * Executes a Redis command on the coroutine-bound connection.
+     */
+    private function executeCommandInternal(string $name, array $params = []): mixed
+    {
+        $connection = $this->borrow();
+        $method = strtolower($name);
+
+        try {
+            return $connection->{$method}(...$params);
+        } catch (\RedisException $e) {
+            // The connection is broken: drop it from the coroutine binding and
+            // the pool so the next call creates a fresh one.
+            $this->releaseCurrent(true);
+            throw new \RuntimeException(sprintf(
+                'Redis command "%s" failed: %s',
+                $name,
+                $e->getMessage()
+            ), 0, $e);
+        }
     }
 
     private function createConnection(): \Redis

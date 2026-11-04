@@ -14,10 +14,16 @@ namespace Yii2S\Swoole\Pools;
  * Implemented by application components that manage a [[ConnectionPool]].
  *
  * It lets infrastructure code (pool pre-warming, the /__pool metrics debug
- * endpoint) discover pooled components without hard-coding their class names
- * and without instantiating unrelated components.
+ * endpoint, the per-request cleanup) discover pooled components without
+ * hard-coding their class names and without instantiating unrelated components.
  */
 interface HasConnectionPool
 {
     public function getPool(): ConnectionPool;
+
+    /**
+     * Returns the coroutine-bound connection to the pool. Safe to call multiple
+     * times; a component with no borrowed connection is a no-op.
+     */
+    public function release(): void;
 }

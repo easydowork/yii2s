@@ -11,6 +11,7 @@ declare(strict_types=1);
 namespace Yii2S\Swoole\Runtime;
 
 use Yii;
+use Yii2S\Swoole\Pools\HasConnectionPool;
 use yii\base\Application;
 use yii\web\Application as WebApplication;
 
@@ -24,11 +25,6 @@ use yii\web\Application as WebApplication;
  */
 class RequestStateManager
 {
-    /**
-     * Component ids that are recreated for every request.
-     */
-    public const REQUEST_SCOPED_COMPONENTS = ['request', 'response', 'session', 'user'];
-
     private static int $activeRequests = 0;
 
     /**
@@ -89,7 +85,7 @@ class RequestStateManager
         // do not need to be reset on every request.
         if (!$app instanceof CoroutineApplication) {
             $definitions = $app->getComponents(true);
-            foreach (self::REQUEST_SCOPED_COMPONENTS as $id) {
+            foreach (CoroutineApplication::REQUEST_SCOPED_COMPONENTS as $id) {
                 if (isset($definitions[$id])) {
                     $app->set($id, $definitions[$id]);
                 }
@@ -113,11 +109,7 @@ class RequestStateManager
                 } catch (\Throwable) {
                     continue;
                 }
-                // Match connection-pool components by `getPool()` only. The
-                // `release` method name is ambiguous: CoroutineRedisQueue has a
-                // release() that re-queues a failed job (and requires a job
-                // argument), so it must not be treated as a pooled component.
-                if (is_object($component) && method_exists($component, 'getPool')) {
+                if ($component instanceof HasConnectionPool) {
                     $ids[] = (string) $id;
                 }
             }
@@ -131,23 +123,19 @@ class RequestStateManager
             } catch (\Throwable) {
                 continue;
             }
-            if (!is_object($component)) {
+            if (!$component instanceof HasConnectionPool) {
                 continue;
             }
 
-            if (method_exists($component, 'release')) {
-                try {
-                    $component->release();
-                } catch (\Throwable $e) {
-                    Yii::error("Failed to release component '{$id}': " . $e->getMessage(), __METHOD__);
-                }
+            try {
+                $component->release();
+            } catch (\Throwable $e) {
+                Yii::error("Failed to release component '{$id}': " . $e->getMessage(), __METHOD__);
             }
-            if (method_exists($component, 'getPool')) {
-                try {
-                    $component->getPool()->sweep();
-                } catch (\Throwable $e) {
-                    Yii::error("Failed to sweep pool of component '{$id}': " . $e->getMessage(), __METHOD__);
-                }
+            try {
+                $component->getPool()->sweep();
+            } catch (\Throwable $e) {
+                Yii::error("Failed to sweep pool of component '{$id}': " . $e->getMessage(), __METHOD__);
             }
         }
 

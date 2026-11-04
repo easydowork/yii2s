@@ -13,7 +13,7 @@ namespace Yii2S\Swoole\Db;
 use Yii2S\Swoole\Coroutine\CoroutineContext;
 use Yii2S\Swoole\Pools\ConnectionPool;
 use Yii2S\Swoole\Pools\HasConnectionPool;
-use Yii2S\Swoole\Resilience\CircuitBreaker;
+use Yii2S\Swoole\Pools\PooledConnectionTrait;
 use yii\db\Connection;
 
 /**
@@ -31,75 +31,13 @@ use yii\db\Connection;
  */
 class CoroutineDbConnection extends Connection implements HasConnectionPool
 {
-    /**
-     * @var int maximum number of pooled connections
-     */
-    public int $poolMaxActive = ConnectionPool::DEFAULT_MAX_ACTIVE;
-
-    /**
-     * @var float seconds to wait for a pooled connection before failing
-     */
-    public float $poolWaitTimeout = ConnectionPool::DEFAULT_WAIT_TIMEOUT;
-
-    /**
-     * @var bool whether to borrow a dedicated connection per coroutine.
-     * Disable to use the standard Yii2 behavior (one shared connection).
-     */
-    public bool $enableCoroutinePooling = true;
-
-    /**
-     * @var bool whether idle connections are validated with a `SELECT 1`
-     * before being reused. Costs one extra round trip per borrow.
-     */
-    public bool $enableHealthCheck = false;
-
-    /**
-     * @var int minimum idle connections to maintain (0 = no minimum). Enforced
-     * by the server's periodic pool keeper; see [[HttpServer::$poolMaintenanceInterval]].
-     */
-    public int $poolMinIdle = ConnectionPool::DEFAULT_MIN_IDLE;
-
-    /**
-     * @var float recycle connections older than this many seconds (0 = disabled).
-     * Prevents long-lived connections from silently going stale (e.g. MySQL
-     * `wait_timeout`, network changes).
-     */
-    public float $poolMaxLifetime = ConnectionPool::DEFAULT_MAX_LIFETIME;
-
-    /**
-     * @var float re-validate idle connections older than this many seconds
-     * (0 = disabled). Requires [[enableHealthCheck]] to be useful.
-     */
-    public float $poolIdleTimeout = ConnectionPool::DEFAULT_IDLE_TIMEOUT;
+    use PooledConnectionTrait;
 
     /**
      * @var float log DB statements slower than this many seconds via
      * `Yii::warning` (category `yii2s.db.slow`). 0 disables slow-query logging.
      */
     public float $slowQueryThreshold = 0.0;
-
-    /**
-     * @var bool whether to guard command execution with a circuit breaker: after
-     * [[circuitFailureThreshold]] consecutive connection-loss failures it fails
-     * fast with [[CircuitOpenException]] (or a fallback) for [[circuitCooldown]]
-     * seconds. Only connection-loss errors (SQLSTATE class `08`, or MySQL 2006/
-     * 2013) count; plain SQL errors never trip the circuit.
-     */
-    public bool $enableCircuitBreaker = false;
-
-    /**
-     * @var int consecutive connection-loss failures before the circuit opens
-     */
-    public int $circuitFailureThreshold = 5;
-
-    /**
-     * @var float seconds the circuit stays open before allowing a probe
-     */
-    public float $circuitCooldown = 30.0;
-
-    private ?ConnectionPool $pool = null;
-
-    private ?CircuitBreaker $circuitBreaker = null;
 
     /**
      * Connection used outside of a coroutine context (plain CLI usage), where
@@ -144,19 +82,6 @@ class CoroutineDbConnection extends Connection implements HasConnectionPool
         }
 
         return $this->pool;
-    }
-
-    /**
-     * @return CircuitBreaker|null the configured circuit breaker, or null when
-     * [[enableCircuitBreaker]] is false
-     */
-    public function getCircuitBreaker(): ?CircuitBreaker
-    {
-        if (!$this->enableCircuitBreaker) {
-            return null;
-        }
-
-        return $this->circuitBreaker ??= new CircuitBreaker($this->circuitFailureThreshold, $this->circuitCooldown);
     }
 
     /**
@@ -211,8 +136,7 @@ class CoroutineDbConnection extends Connection implements HasConnectionPool
      * pool, because it is known to be broken (e.g. the server went away).
      *
      * Called by [[CoroutineCommand]] when a statement fails with a
-     * connection-loss error. Safe to call multiple times: once the binding is
-     * removed, subsequent calls are no-ops.
+     * connection-loss error. Safe to call multiple times.
      */
     public function discardCurrent(): void
     {
@@ -247,6 +171,7 @@ class CoroutineDbConnection extends Connection implements HasConnectionPool
         if ($this->detachedConnection !== null && $this->detachedConnection->getIsActive()) {
             return true;
         }
+
         return CoroutineContext::get(self::CONTEXT_KEY_PREFIX . spl_object_id($this)) !== null
             || $this->getPool()->getIdleCount() > 0;
     }
@@ -288,6 +213,7 @@ class CoroutineDbConnection extends Connection implements HasConnectionPool
         if (!$this->enableCoroutinePooling) {
             return parent::beginTransaction($isolationLevel);
         }
+
         return $this->borrow()->beginTransaction($isolationLevel);
     }
 
@@ -300,6 +226,7 @@ class CoroutineDbConnection extends Connection implements HasConnectionPool
         if (!$this->enableCoroutinePooling) {
             return parent::getTransaction();
         }
+
         return $this->borrow()->getTransaction();
     }
 
@@ -308,6 +235,7 @@ class CoroutineDbConnection extends Connection implements HasConnectionPool
         if (!$this->enableCoroutinePooling) {
             return parent::getSchema();
         }
+
         return $this->borrow()->getSchema();
     }
 
@@ -316,6 +244,7 @@ class CoroutineDbConnection extends Connection implements HasConnectionPool
         if (!$this->enableCoroutinePooling) {
             return parent::getDriverName();
         }
+
         return $this->borrow()->getDriverName();
     }
 
@@ -324,6 +253,7 @@ class CoroutineDbConnection extends Connection implements HasConnectionPool
         if (!$this->enableCoroutinePooling) {
             return parent::getLastInsertID($sequenceName);
         }
+
         return $this->borrow()->getLastInsertID($sequenceName);
     }
 
@@ -332,6 +262,7 @@ class CoroutineDbConnection extends Connection implements HasConnectionPool
         if (!$this->enableCoroutinePooling) {
             return parent::quoteValue($value);
         }
+
         return $this->borrow()->quoteValue($value);
     }
 
@@ -340,6 +271,7 @@ class CoroutineDbConnection extends Connection implements HasConnectionPool
         if (!$this->enableCoroutinePooling) {
             return parent::quoteTableName($name);
         }
+
         return $this->borrow()->quoteTableName($name);
     }
 
@@ -348,6 +280,7 @@ class CoroutineDbConnection extends Connection implements HasConnectionPool
         if (!$this->enableCoroutinePooling) {
             return parent::quoteColumnName($name);
         }
+
         return $this->borrow()->quoteColumnName($name);
     }
 
@@ -356,6 +289,7 @@ class CoroutineDbConnection extends Connection implements HasConnectionPool
         if (!$this->enableCoroutinePooling) {
             return parent::quoteSql($sql);
         }
+
         return $this->borrow()->quoteSql($sql);
     }
 
