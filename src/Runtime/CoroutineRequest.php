@@ -203,15 +203,15 @@ class CoroutineRequest extends Request
     {
         $converted = [];
         foreach ($files as $key => $entry) {
-            if (!is_array($entry) || !isset($entry['name'])) {
+            if (!is_array($entry)) {
                 continue;
             }
-            if (is_string($entry['name']) && isset($entry['tmp_name'])) {
+            if (isset($entry['name']) && is_string($entry['name']) && isset($entry['tmp_name'])) {
                 // Single-file field - already the PHP shape.
                 $converted[(string) $key] = $this->convertFileEntry($entry);
                 continue;
             }
-            if (is_array($entry['name'])) {
+            if (isset($entry['name']) && is_array($entry['name'])) {
                 // Attribute-grouped multi-file shape (PHP's native $_FILES
                 // structure) - map the Swoole error codes in place.
                 if (isset($entry['error']) && is_array($entry['error'])) {
