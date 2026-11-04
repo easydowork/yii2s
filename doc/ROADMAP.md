@@ -85,6 +85,20 @@
 |---|---|
 | **会话 last-write-wins** | Redis 会话无锁，同 session 并发写会互相覆盖（flash/身份变更可能丢）；需要更强隔离时用「有锁会话」或业务侧串行化 |
 
+### 运维工具增强（对标 Hyperf，2026-11-04 立项）
+
+> 目标：补强「看运行状态、多少连接、占多少内存」这类日常运维能力。
+> 对照 Hyperf 的 `metric`/`process`/`crontab`/`describe:routes` 梳理差距。
+> 现状：已有 `swoole/start|stop|reload|check|status`、`queue/serve`、`/metrics`、`/__pool`。
+
+| 项 | 状态 | 目标 | 验收标准 |
+|---|---|---|---|
+| **`swoole/status` 运行时面板** | ⬜ **P0** | 终端直接看 worker 数 / 内存 / 协程数 / DB、Redis 连接数 / 累计请求与错误 | 命令输出面板；优先复用 `/metrics` + `/__pool` 数据，无法 HTTP 时回退 `ps` 读进程树 |
+| **`/metrics` 默认指标补全** | ⬜ P1 | 每 worker 内存、系统负载（Linux）、连接数汇总、每路径 P50/P90/P99 直方图 | 对标 Hyperf/metric 默认指标；内置 `grafana.json` |
+| **`describe:routes` 命令** | ⬜ P1 | 列出 urlManager 规则 + raw 路由 | 输出路由表（method / path / route） |
+| **定时任务 `crontab`** | ⬜ P2 | 秒级定时任务（对标 Hyperf/crontab） | 挂 `EVENT_BEFORE_START` + 协程循环；触发测试 |
+| **限流 / 重试组件** | ⬜ P2 | 对标 Hyperf/rate-limit、hyperf/retry | 熔断已有，补齐「流控三件套」 |
+
 ---
 
 ## 4. 执行计划（三阶段）
@@ -107,8 +121,8 @@
 **目标**：把性能和部署的操作成本降下来。
 
 - [ ] 多实例进程模型（待讨论定案后执行）
-- [ ] 路由缓存 `CoroutineUrlManager`
-- [ ] dispatcher 中间件化重构
+- [x] 路由缓存 `CoroutineUrlManager`
+- [x] dispatcher 中间件化重构
 
 **验收**：路由密集场景压测有据可查；多实例启动/停止/重载一键化。
 
