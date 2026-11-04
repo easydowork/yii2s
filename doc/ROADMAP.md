@@ -93,7 +93,7 @@
 
 | 项 | 状态 | 目标 | 验收标准 |
 |---|---|---|---|
-| **`swoole/status` 运行时面板** | ⬜ **P0** | 终端直接看 worker 数 / 内存 / 协程数 / DB、Redis 连接数 / 累计请求与错误 | 命令输出面板；优先复用 `/metrics` + `/__pool` 数据，无法 HTTP 时回退 `ps` 读进程树 |
+| **`swoole/status` 运行时面板** | ✅ **P0** | 终端直接看 worker 数 / 内存 / 协程数 / DB、Redis 连接数 / 累计请求与错误 | `swoole/status` 输出面板：进程树 RSS + worker 数（`ps`/`pgrep`）+ `/metrics` 请求/协程 + `/__pool` 连接数 |
 | **`/metrics` 默认指标补全** | ⬜ P1 | 每 worker 内存、系统负载（Linux）、连接数汇总、每路径 P50/P90/P99 直方图 | 对标 Hyperf/metric 默认指标；内置 `grafana.json` |
 | **`describe:routes` 命令** | ⬜ P1 | 列出 urlManager 规则 + raw 路由 | 输出路由表（method / path / route） |
 | **定时任务 `crontab`** | ⬜ P2 | 秒级定时任务（对标 Hyperf/crontab） | 挂 `EVENT_BEFORE_START` + 协程循环；触发测试 |

@@ -326,14 +326,171 @@ class SwooleController extends Controller
         }
 
         $info = $pidFile->read();
+        $pid = (int) ($info['pid'] ?? 0);
+        $host = (string) ($info['host'] ?? '127.0.0.1');
+        $port = (string) ($info['port'] ?? '0');
+        $startedAt = (int) ($info['started_at'] ?? 0);
+
         $this->stdout(sprintf(
-            "Server is running: pid %s, listening on %s:%s, started %s\n",
-            (string) ($info['pid'] ?? '?'),
-            (string) ($info['host'] ?? '?'),
-            (string) ($info['port'] ?? '0'),
-            isset($info['started_at']) ? date('Y-m-d H:i:s', (int) $info['started_at']) : 'unknown'
+            "Server is running: pid %d, listening on %s:%s, started %s (%s ago)\n",
+            $pid,
+            $host,
+            $port,
+            $startedAt > 0 ? date('Y-m-d H:i:s', $startedAt) : 'unknown',
+            $startedAt > 0 ? $this->formatDuration(time() - $startedAt) : '?'
         ));
+
+        // Memory + worker count come from the process tree (cross-process and
+        // always available, unlike the HTTP endpoints).
+        $tree = $this->processTreeInfo($pid);
+        if ($tree !== null) {
+            $this->stdout(sprintf(
+                "  workers: %d, memory: %.1f MB (process tree RSS)\n",
+                $tree['workers'],
+                $tree['rssMb']
+            ));
+        }
+
+        // Runtime metrics + connections come from the /metrics and /__pool
+        // endpoints; these reflect a single worker's snapshot (each worker has
+        // its own counters/pool), not the aggregate across all workers.
+        $this->renderMetricsSnapshot($this->fetchUrl("http://{$host}:{$port}/metrics"));
+        $this->renderPoolSnapshot($this->fetchUrl("http://{$host}:{$port}/__pool"));
+
         return ExitCode::OK;
+    }
+
+    /**
+     * RSS and worker count of the server process tree (master + manager +
+     * workers), read via ps/pgrep so it works from a separate CLI process.
+     *
+     * @return array{workers: int, rssMb: float}|null
+     */
+    private function processTreeInfo(int $pid): ?array
+    {
+        $pids = [$pid];
+        $frontier = [$pid];
+        for ($depth = 0; $depth < 4 && $frontier !== []; $depth++) {
+            $next = [];
+            foreach ($frontier as $p) {
+                $out = @shell_exec("pgrep -P {$p} 2>/dev/null");
+                if (!is_string($out)) {
+                    continue;
+                }
+                foreach (preg_split('/\s+/', trim($out)) ?: [] as $child) {
+                    $child = (int) $child;
+                    if ($child > 0) {
+                        $next[] = $child;
+                        $pids[] = $child;
+                    }
+                }
+            }
+            $frontier = $next;
+        }
+
+        $totalRss = 0;
+        foreach (array_unique($pids) as $p) {
+            $out = @shell_exec("ps -o rss= -p {$p} 2>/dev/null");
+            $totalRss += (int) trim((string) $out);
+        }
+
+        if ($totalRss <= 0) {
+            return null;
+        }
+
+        return [
+            // master + manager + N workers: workers = tree size - 2
+            'workers' => max(0, count(array_unique($pids)) - 2),
+            'rssMb' => round($totalRss / 1024, 1),
+        ];
+    }
+
+    /**
+     * Fetches a URL from the running server (best-effort, short timeout).
+     */
+    private function fetchUrl(string $url): ?string
+    {
+        $parsed = parse_url($url);
+        if (!is_array($parsed) || !isset($parsed['host'], $parsed['port'])) {
+            return null;
+        }
+
+        $body = null;
+        \Swoole\Coroutine\run(static function () use ($parsed, &$body): void {
+            $client = new \Swoole\Coroutine\Http\Client((string) $parsed['host'], (int) $parsed['port']);
+            $client->set(['timeout' => 2.0]);
+            $path = ($parsed['path'] ?? '/') . (isset($parsed['query']) ? '?' . $parsed['query'] : '');
+            if ($client->get($path)) {
+                $body = (string) $client->body;
+            }
+            $client->close();
+        });
+
+        return $body;
+    }
+
+    private function renderMetricsSnapshot(?string $metrics): void
+    {
+        if ($metrics === null || $metrics === '') {
+            return;
+        }
+
+        $requests = 0;
+        $errors = 0;
+        $coroutines = null;
+        foreach (explode("\n", $metrics) as $line) {
+            if (preg_match('/^yii2s_http_requests_total\{[^}]*status="(\d+)"\} (\d+)$/', $line, $m)) {
+                $requests += (int) $m[2];
+                if ((int) $m[1] >= 400) {
+                    $errors += (int) $m[2];
+                }
+            } elseif (preg_match('/^yii2s_process_coroutines (\d+)$/', $line, $m)) {
+                $coroutines = (int) $m[1];
+            }
+        }
+
+        $this->stdout(sprintf("  requests: %d (errors %d) [single worker]\n", $requests, $errors));
+        if ($coroutines !== null) {
+            $this->stdout(sprintf("  coroutines: %d [single worker]\n", $coroutines));
+        }
+    }
+
+    private function renderPoolSnapshot(?string $json): void
+    {
+        if ($json === null || $json === '') {
+            return;
+        }
+
+        $data = json_decode($json, true);
+        if (!is_array($data) || !isset($data['pools']) || !is_array($data['pools'])) {
+            return;
+        }
+
+        foreach ($data['pools'] as $id => $m) {
+            if (!is_array($m)) {
+                continue;
+            }
+            $this->stdout(sprintf(
+                "  %s: %d active / %d idle (created %d, timeouts %d, discarded %d)\n",
+                $id,
+                (int) ($m['active'] ?? 0),
+                (int) ($m['idle'] ?? 0),
+                (int) ($m['total_created'] ?? 0),
+                (int) ($m['total_timeouts'] ?? 0),
+                (int) ($m['total_discarded'] ?? 0)
+            ));
+        }
+    }
+
+    private function formatDuration(int $seconds): string
+    {
+        if ($seconds < 60) {
+            return $seconds . 's';
+        }
+        if ($seconds < 3600) {
+            return floor($seconds / 60) . 'm' . ($seconds % 60) . 's';
+        }
+        return floor($seconds / 3600) . 'h' . floor(($seconds % 3600) / 60) . 'm';
     }
 
     protected function resolveServer(bool $ensure = true): ?HttpServer
