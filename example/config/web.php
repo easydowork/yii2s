@@ -46,12 +46,15 @@ return [
             // poolMaxActive is the hard cap on concurrent queries; raise it
             // when a request fans out into many parallel sub-queries.
             'poolMaxActive' => 20,
+            // Minimum idle connections the periodic keeper maintains.
+            'poolMinIdle' => 2,
         ],
         'redis' => [
             'class' => \yii\redis\Connection::class, // swapped by the bootstrap
             'hostname' => '127.0.0.1',
             'port' => 6379,
             'poolMaxActive' => 20,
+            'poolMinIdle' => 2,
         ],
         // Cache/session/queue have no stock counterpart worth wrapping, so
         // their coroutine classes are configured explicitly.
@@ -91,6 +94,9 @@ return [
             // each process needs its own pid file (otherwise the start guard
             // rejects the second one). supervisor can pass a per-process path.
             'pidFile' => getenv('SWOOLE_PID_FILE') ?: null,
+            // Periodic connection-pool upkeep (min-idle replenish, max-lifetime
+            // recycling, idle keepalive). 0 disables.
+            'poolMaintenanceInterval' => 1.0,
             'documentRoot' => '@app/public',
             'dispatcher' => (new \Yii2S\Swoole\Server\RequestDispatcher(__DIR__ . '/web.php', [
                 'enablePoolMetricsEndpoint' => true,
