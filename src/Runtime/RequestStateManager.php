@@ -113,9 +113,11 @@ class RequestStateManager
                 } catch (\Throwable) {
                     continue;
                 }
-                if (is_object($component)
-                    && (method_exists($component, 'release') || method_exists($component, 'getPool'))
-                ) {
+                // Match connection-pool components by `getPool()` only. The
+                // `release` method name is ambiguous: CoroutineRedisQueue has a
+                // release() that re-queues a failed job (and requires a job
+                // argument), so it must not be treated as a pooled component.
+                if (is_object($component) && method_exists($component, 'getPool')) {
                     $ids[] = (string) $id;
                 }
             }
