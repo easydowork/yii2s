@@ -454,6 +454,17 @@ bash scripts/e2e.sh
 bash scripts/bench.sh
 ```
 
+### CI（GitHub Actions）
+
+`.github/workflows/ci.yml` 在 push / PR 时自动跑四个 job：
+
+| Job | 覆盖 |
+|---|---|
+| `phpunit` | PHP 8.2–8.5 矩阵 × 真实 MySQL 8 + Redis 7 × pecl swoole 6.2.x，全量用例 |
+| `smoke` | blog demo 端到端（起真实多进程服务器：MVC、错误页、REST API、session+CSRF、上传+静态、CSV 下载、队列、并发） |
+| `static` | PHPStan（`--error-format=github`，PR 上直接标注行号） |
+| `coding-standard` | php-cs-fixer |
+
 压测章节、组件替换对照表、踩坑记录见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md)；
 质量硬化路线图见 [`doc/ROADMAP.md`](doc/ROADMAP.md)。
 
