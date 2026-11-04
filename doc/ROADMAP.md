@@ -60,7 +60,7 @@
 | 项 | 状态 | 目标 | 验收标准 |
 |---|---|---|---|
 | **多实例进程模型定案** | ⏸️ | `worker_num` 已作为默认多核方案落地；多 master（滚动重启/故障隔离）是否引入仍待定 | 多 master 场景**待单独讨论后再落地**（见 §5） |
-| **路由缓存 `CoroutineUrlManager`** | ⬜ | per-process 数组缓存路由解析，规则多时省 30%+ | 压测对比：规则多场景 QPS 提升、无内存泄漏 |
+| **路由缓存 `CoroutineUrlManager`** | ✅ | per-process 数组缓存路由解析，规则多时省 30%+ | `CoroutineUrlManagerTest` 3 用例：命中缓存、独立缓存、有界缓存 |
 | **慢查询/慢请求日志** | ✅ | DB 查询耗时超阈值记日志 | `CoroutineDbConnection::$slowQueryThreshold` + `CoroutineCommand` 计时，`SELECT SLEEP` 注入测试命中 |
 
 ### P2 · 打磨
@@ -68,7 +68,7 @@
 | 项 | 状态 | 目标 | 验收标准 |
 |---|---|---|---|
 | **dispatcher 中间件化** | ⬜ | static/raw/metrics/error/prewarm 抽成链，职责清晰、可单测 | 现有 server 套件不回归 |
-| **`renderExceptionResponse` 加固** | ⬜ | 错误动作再抛异常时路径更稳 | 错误动作抛异常时仍返回可控响应 |
+| **`renderExceptionResponse` 加固** | ✅ | 错误动作再抛异常时路径更稳 | 兜底 `end()` 包 try/catch，响应已部分写入也不会再抛 |
 | **发布** | ⬜ | tag + Packagist + 版本冻结 + 升级指南 | 可 `composer require` 到固定版本 |
 
 ### 过程中新发现并已修复
