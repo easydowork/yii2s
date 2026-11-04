@@ -8,6 +8,8 @@ cookies.txt
 .php-cs-fixer.cache
 .phpunit.result.cache
 .phpunit.cache/
+# Redis RDB snapshot (written into CWD when a dev Redis is started without --dir)
+/dump.rdb
 
 # Third-party reference code (not part of this package) — kept out of the
 # repo entirely; drop the folders into doc/references/ when needed locally
