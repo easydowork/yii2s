@@ -16,6 +16,11 @@ use Yii2S\Swoole\Runtime\CoroutineRequest;
 use Yii2S\Swoole\Runtime\CoroutineResponse;
 use Yii2S\Swoole\Runtime\RequestStateManager;
 use Yii2S\Swoole\Runtime\SwooleResponseSender;
+use Yii2S\Swoole\Server\Middleware\MetricsMiddleware;
+use Yii2S\Swoole\Server\Middleware\Middleware;
+use Yii2S\Swoole\Server\Middleware\PoolMetricsMiddleware;
+use Yii2S\Swoole\Server\Middleware\RawRouteMiddleware;
+use Yii2S\Swoole\Server\Middleware\StaticFileMiddleware;
 use Swoole\Http\Server as SwooleHttpServer;
 use Swoole\Http\Request;
 use Swoole\Http\Response;
@@ -72,7 +77,10 @@ class RequestDispatcher implements RequestDispatcherInterface
 
     private ?WebApplication $application = null;
 
-    private ?StaticFileServer $staticFileServer = null;
+    /**
+     * @var Middleware[]|null lazily built pre-dispatch chain
+     */
+    private ?array $middlewareChain = null;
 
     private SwooleResponseSender $responseSender;
 
@@ -105,103 +113,6 @@ class RequestDispatcher implements RequestDispatcherInterface
         $this->responseSender = $config['responseSender'] ?? new SwooleResponseSender();
         $this->stateManager = $config['stateManager'] ?? new RequestStateManager();
         $this->requestMetrics = $config['requestMetrics'] ?? new RequestMetrics();
-    }
-
-    /**
-     * Serves the connection pool metrics debug endpoint when enabled. Runs
-     * before the request enters the Yii lifecycle: it only reads pool state
-     * and never borrows a connection.
-     */
-    private function tryServePoolMetrics(Request $swooleRequest, Response $swooleResponse, ?string $path = null): bool
-    {
-        if (!$this->enablePoolMetricsEndpoint) {
-            return false;
-        }
-
-        if ($path === null) {
-            $parsed = parse_url((string) ($swooleRequest->server['request_uri'] ?? ''), PHP_URL_PATH);
-            if (!is_string($parsed)) {
-                return false;
-            }
-            $path = $parsed;
-        }
-        if (rtrim($path, '/') !== $this->poolMetricsPath) {
-            return false;
-        }
-
-        $pools = [];
-        foreach (PoolMetricsCollector::collect($this->getApplication()) as $id => $pool) {
-            try {
-                $pools[$id] = $pool->getMetrics();
-            } catch (\Throwable $e) {
-                $pools[$id] = ['error' => $e->getMessage()];
-            }
-        }
-
-        if ($swooleResponse->isWritable()) {
-            $swooleResponse->status(200);
-            $swooleResponse->header('Content-Type', 'application/json');
-            $swooleResponse->end((string) json_encode(
-                ['pools' => $pools],
-                JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES
-            ));
-        }
-
-        return true;
-    }
-
-    /**
-     * Serves the Prometheus metrics endpoint when enabled. Runs before the
-     * request enters the Yii lifecycle; it only reads counters and pool state
-     * and never borrows a connection.
-     */
-    private function tryServeMetrics(Request $swooleRequest, Response $swooleResponse, ?string $path = null): bool
-    {
-        if (!$this->enableMetricsEndpoint) {
-            return false;
-        }
-        if ($path === null) {
-            $parsed = parse_url((string) ($swooleRequest->server['request_uri'] ?? ''), PHP_URL_PATH);
-            if (!is_string($parsed)) {
-                return false;
-            }
-            $path = $parsed;
-        }
-        if (rtrim($path, '/') !== $this->metricsPath) {
-            return false;
-        }
-
-        $pools = [];
-        foreach (PoolMetricsCollector::collect($this->getApplication()) as $id => $pool) {
-            try {
-                $pools[$id] = $pool->getMetrics();
-            } catch (\Throwable) {
-                // A broken pool must not break the metrics endpoint.
-            }
-        }
-
-        if ($swooleResponse->isWritable()) {
-            $swooleResponse->status(200);
-            $swooleResponse->header('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
-            $swooleResponse->end($this->requestMetrics->render($pools));
-        }
-
-        return true;
-    }
-
-    /**
-     * Attempts to serve the request as a static file.
-     */
-    private function tryServeStaticFile(Request $swooleRequest, Response $swooleResponse, ?string $path = null): bool
-    {
-        if ($this->staticRoot === null) {
-            return false;
-        }
-        if ($this->staticFileServer === null) {
-            $this->staticFileServer = new StaticFileServer($this->staticRoot);
-        }
-
-        return $this->staticFileServer->serve($swooleRequest, $swooleResponse, $path);
     }
 
     /**
@@ -243,57 +154,32 @@ class RequestDispatcher implements RequestDispatcherInterface
     }
 
     /**
-     * Answers a registered raw route. Returns false when the request is not
-     * a raw route and the normal Yii pipeline should handle it.
+     * Builds the pre-dispatch middleware chain: raw routes, static files and
+     * the metrics endpoints run before the Yii request lifecycle.
+     *
+     * @return Middleware[]
      */
-    private function tryRawRoute(Request $request, Response $response, ?string $path = null): bool
+    private function getMiddleware(): array
     {
-        if ($path === null) {
-            $uri = (string) ($request->server['request_uri'] ?? '');
-            $parsed = parse_url($uri, PHP_URL_PATH);
-            if (!is_string($parsed)) {
-                return false;
-            }
-            $path = $parsed;
+        if ($this->middlewareChain === null) {
+            $this->middlewareChain = [
+                new RawRouteMiddleware($this->rawRoutes),
+                new StaticFileMiddleware($this->staticRoot),
+                new PoolMetricsMiddleware(
+                    $this->enablePoolMetricsEndpoint,
+                    $this->poolMetricsPath,
+                    fn (): array => PoolMetricsCollector::collect($this->getApplication())
+                ),
+                new MetricsMiddleware(
+                    $this->enableMetricsEndpoint,
+                    $this->metricsPath,
+                    fn (): array => PoolMetricsCollector::collect($this->getApplication()),
+                    $this->requestMetrics
+                ),
+            ];
         }
 
-        $method = strtoupper((string) ($request->server['request_method'] ?? 'GET'));
-        $handler = $this->rawRoutes[$method . ' ' . $path] ?? null;
-        if ($handler === null) {
-            return false;
-        }
-
-        try {
-            $result = $handler($request, $response);
-            if (!$response->isWritable() || $result === null) {
-                return true; // the handler owns the response
-            }
-
-            if (is_array($result)) {
-                $json = json_encode($result, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-                if ($json === false) {
-                    throw new \RuntimeException('Raw route returned data that cannot be JSON-encoded.');
-                }
-                $response->header('Content-Type', 'application/json; charset=UTF-8');
-                $response->end($json);
-
-                return true;
-            }
-
-            $response->header('Content-Type', 'text/plain; charset=UTF-8');
-            $response->end(is_scalar($result) ? (string) $result : '');
-
-            return true;
-        } catch (Throwable $exception) {
-            Yii::error('Raw route ' . $method . ' ' . $path . ' failed: ' . $exception->getMessage(), __METHOD__);
-            if ($response->isWritable()) {
-                $response->status(500);
-                $response->header('Content-Type', 'text/plain; charset=UTF-8');
-                $response->end('Internal Server Error');
-            }
-
-            return true;
-        }
+        return $this->middlewareChain;
     }
 
     public function dispatch(Request $swooleRequest, Response $swooleResponse, SwooleHttpServer $server): void
@@ -315,20 +201,12 @@ class RequestDispatcher implements RequestDispatcherInterface
             // request lifecycle. A malformed path must never escape as an
             // uncaught exception: inside a coroutine that terminates the worker.
             try {
-                if ($path !== null && $this->rawRoutes !== [] && $this->tryRawRoute($swooleRequest, $swooleResponse, $path)) {
-                    return;
-                }
-
-                if ($path !== null && $this->tryServeStaticFile($swooleRequest, $swooleResponse, $path)) {
-                    return;
-                }
-
-                if ($path !== null && $this->tryServePoolMetrics($swooleRequest, $swooleResponse, $path)) {
-                    return;
-                }
-
-                if ($path !== null && $this->tryServeMetrics($swooleRequest, $swooleResponse, $path)) {
-                    return;
+                if ($path !== null) {
+                    foreach ($this->getMiddleware() as $middleware) {
+                        if ($middleware->process($swooleRequest, $swooleResponse, $path)) {
+                            return;
+                        }
+                    }
                 }
             } catch (Throwable $exception) {
                 Yii::error('Pre-dispatch request handling failed: ' . $exception->getMessage(), __METHOD__);
