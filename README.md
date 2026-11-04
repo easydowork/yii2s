@@ -5,15 +5,25 @@
 组件类即可。
 
 ```json
-{"app":"yii2s-example","engine":"swoole-coroutine","php":"8.5.4","swoole":"6.2.4","pid":757,"cid":5}
+{"app":"yii2s-example","engine":"swoole-coroutine","php":"8.4.14","swoole":"6.2.0","pid":757,"cid":5}
 ```
 
-基准数据（macOS + swoole-cli，12 worker 多进程，keep-alive，50 并发 3s）：纯框架
-**21769 QPS**（p50 1.44ms）/ 带 DB 查询 **6790 QPS** / 带 Redis **7459 QPS**，
-连接池零超时零泄漏，详见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md) 的压测章节。
+**能力一览**
 
-上生产前的工程硬化计划（观测/连接池健康/降级熔断/多实例/发布）见
-[`doc/ROADMAP.md`](doc/ROADMAP.md)。
+| 领域 | 特性 |
+|---|---|
+| 核心 | 多进程 `Swoole\Http\Server`（`worker_num = CPU 核数`）、协程连接池、每请求状态隔离、优雅停机/热重载 |
+| 性能 | 路由缓存、单飞锁（thundering herd 抑制）、raw 路由极简通道、内置压测器 |
+| 观测 | `/metrics`（Prometheus：RED + 池 + 进程 + 跨 worker 聚合 + 系统负载）、`/__pool`、`swoole/status` 运行时面板 |
+| 韧性 | 熔断器、限流、重试、连接池健康机制（min-idle / max-lifetime / 空闲保活）、DB 断线自愈 |
+| 运维 | `swoole/start|stop|reload|check|status|routes`、`queue/serve`、长跑检漏脚本、watch 热重载 |
+| 调度 | 秒级定时任务（crontab） |
+
+基准（macOS + swoole-cli，12 worker，keep-alive，100 并发 5s）：纯框架 **24832 QPS**（p50 2.94ms）/
+带 DB 查询 **10294 QPS** / 带 Redis **7766 QPS**，连接池零超时零泄漏，详见
+[`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md) 的压测章节。
+
+上生产前的工程硬化计划见 [`doc/ROADMAP.md`](doc/ROADMAP.md)。
 
 ---
 
@@ -60,9 +70,91 @@ curl http://127.0.0.1:9501/
 curl http://127.0.0.1:9501/demo/db
 ```
 
-## 接入现有 Yii2 应用
+## 架构一览
 
-### 1. HTTP 服务器组件 + Bootstrap
+### 进程模型与请求流
+
+```mermaid
+flowchart LR
+    C[客户端] -->|静态文件 + TLS| N[nginx]
+    N -->|动态请求| M[master 主进程<br/>监听 / 信号 / 优雅停机]
+    M --> MG[manager 进程<br/>worker 管理]
+    MG --> W0[worker 0]
+    MG --> W1[worker 1]
+    MG --> WN[worker N-1]
+
+    W0 & W1 & WN --> D[RequestDispatcher<br/>中间件链]
+    D -->|Raw路由 → 静态文件 → /__pool → /metrics → Yii| A[常驻 CoroutineApplication]
+    A --> DB[(MySQL 连接池)]
+    A --> R[(Redis 连接池)]
+    A --> S[CoroutineSession]
+```
+
+### 单请求生命周期
+
+```mermaid
+sequenceDiagram
+    participant C as 客户端
+    participant W as Swoole Worker
+    participant MW as 中间件链
+    participant Y as Yii2 Application
+    participant P as 连接池
+
+    C->>W: HTTP 请求
+    W->>MW: dispatch()
+    alt 命中 raw 路由 / 静态文件 / metrics 端点
+        MW-->>C: 直接写回响应（不创建 Yii 对象）
+    else 进入 Yii 生命周期
+        MW->>Y: beginRequest() 重建 request/response/session/user
+        Y->>Y: 路由 + 控制器 + 过滤器
+        Y->>P: borrow() 借连接（协程粘性）
+        P->>P: 空闲复用 / 新建 / 等待
+        Y->>P: release() 归还
+        MW->>MW: cleanup()（release + sweep 死协程 + 日志 flush）
+        MW-->>C: 发送响应
+    end
+```
+
+### 连接池工作流
+
+```mermaid
+flowchart TD
+    B[borrow 借连接] --> I{空闲池有连接?}
+    I -- 有 --> V{校验 + 未过期?}
+    V -- 通过 --> T[take 借出<br/>记录 coroutine id]
+    V -- 失效/过期 --> D[destroy 销毁]
+    I -- 无 --> S{size 小于 maxActive?}
+    S -- 是 --> CR[create 新建]
+    CR --> T
+    S -- 否 --> W[wait 等待<br/>waitTimeout 超时抛错]
+    W -- 有归还 --> I
+    T --> R[return 归还到空闲池]
+    R --> K[健康机制<br/>min-idle / max-lifetime / 空闲保活]
+    K --> SW[sweep 回收<br/>死协程的连接]
+```
+
+### 生产部署拓扑
+
+```mermaid
+flowchart LR
+    User[用户] --> LB[nginx / 负载均衡]
+    LB --> SW1[Swoole 实例 :9501]
+    LB --> SW2[Swoole 实例 :9502]
+    LB --> SWN[Swoole 实例 :950N]
+    SW1 & SW2 & SWN --> DB[(MySQL 主从)]
+    SW1 & SW2 & SWN --> RD[(Redis)]
+    PR[Prometheus / Grafana] -.->|抓取 /metrics| SW1
+    PR -.->|抓取 /metrics| SW2
+    PR -.->|抓取 /metrics| SWN
+```
+
+设计原则：**状态隔离做在调度层，上层 Yii2 组件尽量不改**——这也是 CSRF、Basic Auth、
+事务、MULTI 无需适配就能用的原因。完整的组件替换对照表和踩坑记录见
+[`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md)。
+
+---
+
+## 接入现有 Yii2 应用
 
 ### 方式一：一行接入（推荐）
 
@@ -91,8 +183,6 @@ php yii swoole/start        # 就这么跑起来了
 
 ### 方式二：显式配置（完全控制）
 
-适合需要逐组件把关或覆写的场景——直接写协程类即可：
-
 ```php
 'request' => [
     'class' => \Yii2S\Swoole\Runtime\CoroutineRequest::class,
@@ -113,28 +203,51 @@ php yii swoole/start        # 就这么跑起来了
     'class' => \Yii2S\Swoole\Db\CoroutineDbConnection::class,
     'dsn' => 'mysql:host=127.0.0.1;dbname=app',
     'username' => '...', 'password' => '...',
-    'poolMaxActive' => 20,        // 池容量：并发查询的硬上限
-    'poolWaitTimeout' => 3.0,     // 借不到连接的等待秒数
+    'poolMaxActive' => 20,            // 池容量：并发查询的硬上限
+    'poolWaitTimeout' => 3.0,         // 借不到连接的等待秒数
+    'poolMinIdle' => 2,               // 最小空闲水位（配合服务器定时 keeper）
+    'poolMaxLifetime' => 300,         // 连接最长存活秒数（到期回收，0 关闭）
+    'poolIdleTimeout' => 60,          // 空闲超时重校验（配合 enableHealthCheck）
+    'enableHealthCheck' => true,      // 借出前 SELECT 1 校验
+    'slowQueryThreshold' => 0.5,      // 慢查询日志阈值秒（0 关闭）
+    'enableCircuitBreaker' => true,   // 熔断：连续连接失败后快速失败
+    'circuitFailureThreshold' => 5,
+    'circuitCooldown' => 30,
 ],
 'redis' => [
     'class' => \Yii2S\Swoole\Redis\CoroutineRedisConnection::class,
     'hostname' => '127.0.0.1',
     'poolMaxActive' => 20,
+    'enableCircuitBreaker' => true,
+],
+'urlManager' => [
+    'class' => \Yii2S\Swoole\Runtime\CoroutineUrlManager::class,  // 路由缓存（规则多时省 CPU）
+    'enablePrettyUrl' => true,
+    'showScriptName' => false,
 ],
 'swooleHttpServer' => [
     'class' => \Yii2S\Swoole\Server\HttpServer::class,
     'host' => '127.0.0.1',
     'port' => 9501,
     'pidFile' => '@app/runtime/swoole-server.pid',
-    'documentRoot' => '@app/public',      // 可选：静态文件（开发环境）
-    'dispatcher' => new \Yii2S\Swoole\Server\RequestDispatcher('@app/config/web.php'),
+    'documentRoot' => '@app/public',           // 可选：静态文件（开发环境）
+    'prewarmConnections' => 2,                // 预热连接池，避免冷启动连接风暴
+    'poolMaintenanceInterval' => 30.0,        // 连接池健康 keeper 间隔（0 关闭）
+    'dispatcher' => new \Yii2S\Swoole\Server\RequestDispatcher('@app/config/web.php', [
+        'enablePoolMetricsEndpoint' => true,  // /__pool
+        'enableMetricsEndpoint' => true,      // /metrics
+        'enableMetricsAggregation' => true,   // /metrics 跨 worker 聚合（Redis）
+    ]),
 ],
 ```
 
 两种方式下，cache / session / queue 都需要显式协程类（无 stock 对应物可自动替换）：
 
 ```php
-'cache' => ['class' => \Yii2S\Swoole\Cache\CoroutineRedisCache::class, 'redis' => 'redis'],
+'cache' => [
+    'class' => \Yii2S\Swoole\Cache\CoroutineRedisCache::class,
+    'redis' => 'redis',               // getOrSet 自带单飞锁，冷缓存不惊群
+],
 'session' => ['class' => \Yii2S\Swoole\Session\CoroutineSession::class, 'redis' => 'redis'],
 'queue' => [
     'class' => \Yii2S\Swoole\Queue\CoroutineRedisQueue::class,
@@ -155,16 +268,9 @@ DB 的事务也都原生支持（连接在协程内粘性借用）。
 ## 极简接口快速通道（raw 路由）
 
 健康检查、指标、极简只读接口这类请求，可以注册 **raw 路由**：命中后**不创建 Yii 的
-request/response**，直接写回 Swoole 响应。同一台机器、同一个 `ab` 客户端实测：
-
-| 路径 | QPS（单 worker，同机 ab -k） |
-|---|---|
-| raw 路由 `/ping` | **55,000 – 62,000** |
-| 完整 Yii 路由 `/` | 14,200 – 15,000 |
-| 裸 Swoole（无框架） | 58,000 – 63,000 |
+request/response**，直接写回 Swoole 响应：
 
 ```php
-// config/web.php（需要显式配置 swooleHttpServer.dispatcher）
 'swooleHttpServer' => [
     'class' => \Yii2S\Swoole\Server\HttpServer::class,
     'documentRoot' => '@app/web',
@@ -179,20 +285,34 @@ request/response**，直接写回 Swoole 响应。同一台机器、同一个 `a
 - 返回值：`string` → `text/plain`；`array` → `application/json`；`null` → handler 自己
   操作 Swoole response（签名 `(Request $request, Response $response)`）。
 - 精确匹配 `METHOD + path`，query 不参与匹配；方法不匹配会**回落**到 Yii 路由。
-- **绕过 Yii**：不经过路由、session、CSRF、用户认证。只放公开/无状态端点；
-  需要鉴权、限流或审计的接口不要用 raw 路由。
-- raw 路由、普通 Yii 路由、静态文件可以共存于同一个 dispatcher。
+- **绕过 Yii**：不经过路由、session、CSRF、用户认证。只放公开/无状态端点。
+- 微基准：raw 路由约 4 万 QPS，接近裸 Swoole；完整 Yii 生命周期约 2.3 万 QPS（100 并发 5s，见压测章节）。
 
 ## 控制台命令
 
 ```bash
 php yii swoole/start [--host=] [--port=] [--watch]  # 启动（阻塞），写 pid 文件
-php yii swoole/status                               # 查看运行状态
+php yii swoole/status                               # 运行时面板：worker 数/内存/协程数/连接数/请求
+php yii swoole/routes                               # 列出 raw 路由 + urlManager 规则
 php yii swoole/stop                                 # 优雅停机（在途请求排空后退出）
 php yii swoole/reload                               # 停机 + 尽力重新拉起（生产建议交给 supervisor）
 php yii swoole/check                                # 配置体检（Application 隔离、cookie key、prettyUrl、db/redis 探活）
 php yii queue/serve [--limit=N]                     # 队列消费 worker（无限轮询）
 ```
+
+`status` 输出示例：
+
+```
+Server is running: pid 84268, listening on 127.0.0.1:9601, started ... (1s ago)
+  workers: 12, memory: 47.1 MB (process tree RSS)
+  requests: 7 (errors 0) [single worker]
+  coroutines: 1 [single worker]
+  db: 0 active / 1 idle (created 1, timeouts 0, discarded 0)
+  redis: 0 active / 0 idle (created 0, timeouts 0, discarded 0)
+```
+
+> `status` 里的请求/协程/连接数是**单 worker 快照**（`/metrics`、`/__pool` 由随机 worker
+> 处理）；内存和 worker 数是全量（进程树 RSS）。要全量聚合用 `/metrics`（见下）。
 
 ### 开发热重载
 
@@ -201,12 +321,78 @@ php yii swoole/start --watch
 ```
 
 修改 `@app` 下的 PHP 文件后，服务器**自动优雅重启**并加载新代码（约 1 秒内完成，
-在途请求不中断）。轮询 mtime 实现、零外部依赖，Linux/macOS 行为一致。
-可调参数：`watchDirs`（默认 `@app`）、`watchInterval`（默认 0.5s）、
-`watchExcludes`（默认 runtime/vendor 等）。**开发专用**——重启进程，生产禁止。
+在途请求不中断）。轮询 mtime 实现、零外部依赖。**开发专用**——重启进程，生产禁止。
 
-定时任务等长生命周期特性通过服务器生命周期事件插槽挂载（`on beforeStart` +
-协程循环），示例见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md) 第四部分 4.1。
+## 观测与运维
+
+### `/metrics`（Prometheus）
+
+```bash
+# 配置 dispatcher: enableMetricsEndpoint => true
+curl http://127.0.0.1:9501/metrics
+```
+
+输出：请求量/状态码（`yii2s_http_requests_total`）、耗时直方图、池状态、进程内存/协程、
+系统负载（`yii2s_process_load_average`，Linux）。启用 `enableMetricsAggregation => true`
+后，指标**跨 worker 聚合**（Redis），`yii2s_process_memory_bytes` 带 `worker=` 标签。
+
+### `/__pool`（连接池）
+
+```bash
+# 配置 dispatcher: enablePoolMetricsEndpoint => true
+curl http://127.0.0.1:9501/__pool
+```
+
+### 长跑检漏 + 压测
+
+```bash
+swoole-cli scripts/bench.php --path=/demo/db --concurrency=100 --duration=5   # 协程压测器
+swoole-cli scripts/soak.php --path=/demo/db --duration=60 --pid=<server pid>   # 长跑检漏：RSS/池漂移
+```
+
+## 韧性组件
+
+| 组件 | 作用 | 配置 |
+|---|---|---|
+| `CircuitBreaker` | 依赖故障时快速失败，避免 500 连击 | DB/Redis 的 `enableCircuitBreaker` 等 |
+| `RateLimiter` | Redis 固定窗口限流 | `new RateLimiter($redis)->allow($key, $limit, $window)` |
+| `Retry` | 指数退避重试 + 可重试异常白名单 | `(new Retry())->call($fn, $attempts, [Timeout::class])` |
+| 连接池健康 | min-idle 水位 / max-lifetime 回收 / 空闲保活 | `poolMinIdle`/`poolMaxLifetime`/`poolIdleTimeout` |
+| DB 断线自愈 | 连接丢失自动 discard，下个请求重建 | 内置于 `CoroutineCommand` |
+| 单飞锁 | `getOrSet` 冷缓存并发 miss 只跑一次回调 | 内置于 `CoroutineRedisCache` |
+
+```php
+// 熔断
+use Yii2S\Swoole\Resilience\CircuitBreaker;
+$breaker = new CircuitBreaker(5, 30);           // 5 次失败打开，30s 冷却
+$result  = $breaker->call(fn () => $api->fetch(), fn () => $fallback);
+
+// 限流
+use Yii2S\Swoole\Resilience\RateLimiter;
+if (!(new RateLimiter(Yii::$app->redis))->allow($ip, 100, 60)) {
+    throw new \yii\web\TooManyRequestsHttpException();
+}
+
+// 重试
+use Yii2S\Swoole\Resilience\Retry;
+$result = (new Retry())->call(fn () => $rpc->call(), 3, [TimeoutException::class]);
+```
+
+## 定时任务（crontab）
+
+秒级定时任务（对标 Hyperf/crontab），`@every Ns` 或标准 5 字段 cron：
+
+```php
+use Yii2S\Swoole\Scheduling\Crontab;
+use Yii2S\Swoole\Scheduling\CrontabDispatcher;
+
+$dispatcher = new CrontabDispatcher();
+$dispatcher->add(new Crontab('清理过期会话', '@every 5m', fn () => Session::gc()));
+$dispatcher->add(new Crontab('每日汇总', '0 2 * * *', fn () => Stats::aggregateDaily()));
+
+// 在 workerStart 的协程里每秒 tick 一次（或在独立协程里 run()）
+\Swoole\Coroutine::create(fn () => $dispatcher->run());
+```
 
 ## 生产部署（Linux）
 
@@ -225,55 +411,9 @@ stopsignal=TERM
 stopwaitsecs=25                ; 必须大于 gracefulTimeout(10s)，留出排空时间
 ```
 
-> 同端口多实例（`SO_REUSEPORT`，已在 server factory 中启用）**可用**，但每个实例
-> 必须有独立的 pid 文件，否则第二个进程会被 `swoole/start` 的防重复启动守卫拒绝。
-> 示例配置已支持 `SWOOLE_PID_FILE`：
->
-> ```ini
-> command=swoole-cli /app/yii swoole/start --host=127.0.0.1 --port=9501
-> environment=SWOOLE_PID_FILE="/app/runtime/swoole-%(process_num)02d.pid"
-> numprocs=4
-> ```
->
-> `swoole/stop`/`status`/`reload` 是按单个 pid 文件操作的，这种模式由 supervisor
-> 负责生命周期；想直接用控制台命令管多个实例，用上面的多端口 + upstream。
-
-nginx upstream、真实客户端 IP（`trustedProxies`）、超时、上传大小等生产清单见
-[`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md) 部署章节。
-
-## 调试
-
-```bash
-# 连接池指标（默认关闭；RequestDispatcher 配置 enablePoolMetricsEndpoint => true 开启）
-curl http://127.0.0.1:9501/__pool
-
-# Prometheus 指标（默认关闭；配置 enableMetricsEndpoint => true 开启）
-# 请求量/状态码、耗时直方图、池状态、进程内存/协程数
-curl http://127.0.0.1:9501/metrics
-
-# 内置压测器（协程，无需 wrk/ab）
-swoole-cli scripts/bench.php --path=/demo/db --concurrency=100 --duration=5
-
-# 长跑检漏：持续压测 + 采样 RSS/连接池漂移
-swoole-cli scripts/soak.php --path=/demo/db --duration=60 --pid=<server pid>
-```
-
-## 架构一览
-
-```
-请求 → Swoole Http\Server（多进程多协程，worker_num = CPU 核数；多实例 = 多端口 + nginx upstream）
-     → RequestDispatcher（静态文件 / /__pool / Yii2）
-     → 常驻 Yii2 Application（进程内只创建一次，CoroutineApplication）
-        ├─ request/response/session/user：每协程独立实例（并发请求互不可见）
-        ├─ db/redis：连接池 borrow/return（协程粘性，协程结束自动 sweep 回收）
-        └─ 结束时：RequestStateManager 统一 release + 池 sweep + 日志 flush
-```
-
-设计原则：**状态隔离做在调度层，上层 Yii2 组件尽量不改**——这也是 CSRF、Basic Auth、
-事务、MULTI 无需适配就能用的原因。
-
-完整的**接入 → 启动 → 单请求 → 停机**流程图、组件替换对照表和生产拓扑见
-[`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md) 第 3.1.1 节；设计思路与踩坑记录在同文档其余章节。
+> 同端口多实例（`SO_REUSEPORT`）**可用**，但每个实例必须有独立的 pid 文件。示例配置已
+> 支持 `SWOOLE_PID_FILE`。nginx upstream、真实客户端 IP（`trustedProxies`）、超时、
+> 上传大小等生产清单见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md) 部署章节。
 
 ## 已知限制
 
@@ -283,57 +423,36 @@ swoole-cli scripts/soak.php --path=/demo/db --duration=60 --pid=<server pid>
 - 不要在常驻进程中使用 `$_SESSION`/`header()`/`setcookie()` 等超全局/过程式 API，
   一律走 `Yii::$app->request/response/session`
 - 自定义 `Application` 类必须继承 `Yii2S\Swoole\Runtime\CoroutineApplication`，否则
-  request/response/session/user 会在并发请求间共享（默认 `yii\web\Application` 由
-  调度器自动换成该子类，无需改动）
+  request/response/session/user 会在并发请求间共享
 - 子协程（`Coroutine::create()`）**不继承**协程上下文：在子协程里访问
   `Yii::$app->request/session/user` 会得到该请求之外的空实例。并发子任务请先在
   父协程取出所需数据再传入（DB/Redis 连接池本身不受影响）
-- 上传有两种写法，按是否需要落盘选择：
-  - `yii\web\UploadedFile`（官方 API）能读，但它的 `saveAs()` 用 `move_uploaded_file()`，
-    Swoole 自己写的临时文件不在 PHP 的上传登记表里，**默认参数下必然返回 false**；
-    而且它读进程级 `$_FILES`，并发请求下可能串文件。
-  - 要保存文件请用 `Yii2S\Swoole\Runtime\CoroutineUploadedFile`（API 完全一致：
-    `getInstance()/getInstances()/getInstanceByName()/saveAs()`），它从当前协程的
-    请求取文件，不碰 `$_FILES`：
+- 上传用 `Yii2S\Swoole\Runtime\CoroutineUploadedFile`（官方 `yii\web\UploadedFile` 的
+  `saveAs()` 在 Swoole 下会失败，且读进程级 `$_FILES` 并发串文件）：
 
-    ```php
-    use Yii2S\Swoole\Runtime\CoroutineUploadedFile as UploadedFile;
-
-    $file = UploadedFile::getInstance($model, 'avatar');
-    if ($file !== null && $file->saveAs('@app/web/uploads/' . $file->name)) {
-        // 已落盘，临时文件同时被移走
-    }
-    ```
-
-    仍然建议在动作入口、任何协程让出之前取走 `UploadedFile`（协程版本已无全局状态，
-    这条只是让数据更早绑定到当前请求）。
+  ```php
+  use Yii2S\Swoole\Runtime\CoroutineUploadedFile as UploadedFile;
+  $file = UploadedFile::getInstance($model, 'avatar');
+  $file?->saveAs('@app/web/uploads/' . $file->name);
+  ```
 
 ## 开发与测试
 
 目标平台 Linux；测试可在 Linux 与 macOS（swoole-cli）上完整运行，
-全量 204 tests / 841 assertions（2 skipped）全绿（macOS + swoole-cli 6.2.0 /
-PHP 8.4 实测；CI 同源的 pecl 构建跑同一套用例）。
-其中 `tests/compat/` 是按功能点组织的迁移兼容性套件（路由、请求、响应格式、
-Cookie、CSRF、会话、登录、Flash、上传、下载、错误处理、常驻服务、并发隔离），
-可按域单独运行：`swoole-cli vendor/bin/phpunit --no-coverage tests/compat`。
+全量 **204 tests / 841 assertions**（2 skipped）全绿。
 
 ```bash
 composer test    # PHPUnit（需要本地 MySQL/Redis）
 composer static  # PHPStan level 5
 composer cs      # php-cs-fixer（与官方 yii2 同规则）
 
-# 进程级端到端（start/status/reload 真实 respawn/SIGTERM）与基准：
-# 两个脚本都支持 macOS/Linux，可用 CLI/PORT/APP_DIR/CONCURRENCY/DURATION 覆盖
+# 进程级端到端（start/status/reload respawn/SIGTERM）与基准：
 bash scripts/e2e.sh
-bash scripts/bench.sh   # 本机基线见下方说明
-
-# macOS + swoole-cli，12 worker 多进程，50 并发 3s，0 错误、池零超时：
-#   /            21769 QPS (p50 1.44ms)
-#   /demo/db     6790 QPS  (p50 4.37ms)
-#   /demo/redis  7459 QPS  (p50 4.24ms)
+bash scripts/bench.sh
 ```
 
-标准 pecl 构建的安装与复现步骤见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md) 验证状态一节。
+压测章节、组件替换对照表、踩坑记录见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md)；
+质量硬化路线图见 [`doc/ROADMAP.md`](doc/ROADMAP.md)。
 
 ## License
 
