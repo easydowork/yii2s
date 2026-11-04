@@ -431,7 +431,9 @@ class SwooleController extends Controller
 
     private function renderMetricsSnapshot(?string $metrics): void
     {
-        if ($metrics === null || $metrics === '') {
+        // A disabled endpoint returns a 404 page, not the Prometheus text; only
+        // parse real metric output so we do not print a misleading "0 requests".
+        if ($metrics === null || $metrics === '' || !str_contains($metrics, 'yii2s_http_requests_total')) {
             return;
         }
 
