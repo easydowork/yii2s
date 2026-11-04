@@ -96,8 +96,8 @@
 | **`swoole/status` 运行时面板** | ✅ **P0** | 终端直接看 worker 数 / 内存 / 协程数 / DB、Redis 连接数 / 累计请求与错误 | `swoole/status` 输出面板：进程树 RSS + worker 数（`ps`/`pgrep`）+ `/metrics` 请求/协程 + `/__pool` 连接数 |
 | **`/metrics` 默认指标补全** | ✅ P1 | 每 worker 内存、系统负载、连接数汇总、每路径 P50/P90/P99 直方图 | 新增 `MetricsAggregator`（Redis 跨 worker 聚合，`enableMetricsAggregation`）+ `sys_getloadavg`；每路径直方图与 grafana.json 待续 |
 | **`describe:routes` 命令** | ✅ P1 | 列出 urlManager 规则 + raw 路由 | `swoole/routes` 输出 raw 路由 + urlManager 规则表 |
-| **定时任务 `crontab`** | ⬜ P2 | 秒级定时任务（对标 Hyperf/crontab） | 挂 `EVENT_BEFORE_START` + 协程循环；触发测试 |
-| **限流 / 重试组件** | ⬜ P2 | 对标 Hyperf/rate-limit、hyperf/retry | 熔断已有，补齐「流控三件套」 |
+| **定时任务 `crontab`** | ✅ P2 | 秒级定时任务（对标 Hyperf/crontab） | `Crontab` + `CrontabDispatcher`（`@every Ns` + 5 字段 cron）；`CrontabDispatcherTest` 4 用例 |
+| **限流 / 重试组件** | ✅ P2 | 对标 Hyperf/rate-limit、hyperf/retry | `RateLimiter`（Redis 固定窗口）+ `Retry`（指数退避）；`RateLimiterTest` + `RetryTest` |
 
 ---
 
