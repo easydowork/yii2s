@@ -11,6 +11,8 @@ declare(strict_types=1);
 namespace yii2stest\redis;
 
 use Yii2S\Swoole\Redis\CoroutineRedisConnection;
+use Yii2S\Swoole\Resilience\CircuitBreaker;
+use Yii2S\Swoole\Resilience\CircuitOpenException;
 use yii2stest\TestCase;
 
 /**
@@ -112,5 +114,33 @@ class CoroutineRedisConnectionTest extends TestCase
         });
 
         $this->assertSame(5, $idle);
+    }
+
+    public function testCircuitBreakerOpensWhenRedisIsUnreachable(): void
+    {
+        $redis = new CoroutineRedisConnection([
+            'hostname' => '127.0.0.1',
+            'port' => 1, // nothing listens here
+            'enableCircuitBreaker' => true,
+            'circuitFailureThreshold' => 2,
+            'circuitCooldown' => 30.0,
+        ]);
+
+        $this->runInCoroutine(function () use ($redis): void {
+            for ($i = 0; $i < 2; $i++) {
+                try {
+                    $redis->get('whatever');
+                    $this->fail('expected a connection failure');
+                } catch (\Throwable) {
+                }
+            }
+
+            $this->assertSame(CircuitBreaker::STATE_OPEN, $redis->getCircuitBreaker()->getState());
+
+            // The command execution (not just the first borrow) is guarded, so
+            // the third call fails fast without touching the network.
+            $this->expectException(CircuitOpenException::class);
+            $redis->get('whatever');
+        });
     }
 }

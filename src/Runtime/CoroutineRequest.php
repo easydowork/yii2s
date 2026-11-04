@@ -357,6 +357,32 @@ class CoroutineRequest extends Request
         $this->resolvedHostInfo = $value;
     }
 
+    public function getServerName(): ?string
+    {
+        $host = $this->getHostName();
+
+        return is_string($host) ? $host : null;
+    }
+
+    public function getServerPort(): ?int
+    {
+        // Honor the forwarding headers first (same as the stock implementation).
+        foreach ($this->portHeaders as $portHeader) {
+            if ($this->getHeaders()->has($portHeader)) {
+                $port = $this->getHeaders()->get($portHeader);
+                if ($port !== null) {
+                    return (int) $port;
+                }
+            }
+        }
+
+        // Fall back to the actual listening port carried by Swoole (the stock
+        // code reads $_SERVER['SERVER_PORT'], which is empty in a coroutine).
+        $port = $this->serverParam('server_port');
+
+        return $port !== null ? (int) $port : null;
+    }
+
     public function getIsSecureConnection(): bool
     {
         $https = strtolower((string) $this->serverParam('https'));

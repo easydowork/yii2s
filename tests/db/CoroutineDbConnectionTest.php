@@ -11,6 +11,7 @@ declare(strict_types=1);
 namespace yii2stest\db;
 
 use yii2stest\DatabaseTestCase;
+use Yii2S\Swoole\Db\CoroutineDbConnection;
 use yii\db\Connection;
 
 /**
@@ -191,5 +192,34 @@ class CoroutineDbConnectionTest extends DatabaseTestCase
 
         $metrics = $db->getPool()->getMetrics();
         $this->assertSame(0, $metrics['total_borrowed'], 'pool must be untouched outside coroutines');
+    }
+
+    public function testPooledConnectionCarriesReadWriteSplitConfig(): void
+    {
+        $masters = [['dsn' => 'mysql:host=127.0.0.1;dbname=yii2s_test']];
+        $slaves = [['dsn' => 'mysql:host=127.0.0.1;dbname=yii2s_test']];
+
+        $db = new CoroutineDbConnection([
+            'dsn' => 'mysql:host=127.0.0.1;dbname=yii2s_test',
+            'username' => 'root',
+            'password' => 'root',
+            'masters' => $masters,
+            'slaves' => $slaves,
+            'masterConfig' => ['username' => 'root'],
+            'slaveConfig' => ['username' => 'root'],
+            'enableSlaves' => true,
+        ]);
+
+        $this->runInCoroutine(function () use ($db, $masters, $slaves): void {
+            $connection = $db->borrow();
+
+            $this->assertSame($masters, $connection->masters);
+            $this->assertSame($slaves, $connection->slaves);
+            $this->assertSame(['username' => 'root'], $connection->masterConfig);
+            $this->assertSame(['username' => 'root'], $connection->slaveConfig);
+            $this->assertTrue($connection->enableSlaves);
+
+            $db->release();
+        });
     }
 }

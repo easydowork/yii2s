@@ -183,10 +183,7 @@ class CoroutineRedisConnection extends Component implements HasConnectionPool
             return $connection;
         }
 
-        $breaker = $this->getCircuitBreaker();
-        $connection = $breaker !== null
-            ? $breaker->call(fn (): \Redis => $this->getPool()->borrow())
-            : $this->getPool()->borrow();
+        $connection = $this->getPool()->borrow();
         CoroutineContext::set($key, $connection);
 
         return $connection;
@@ -214,6 +211,22 @@ class CoroutineRedisConnection extends Component implements HasConnectionPool
      * @throws \RuntimeException when the connection fails
      */
     public function executeCommand(string $name, array $params = []): mixed
+    {
+        // The command execution is the fallible network operation, so the
+        // circuit breaker wraps it here - not the sticky borrow(), which would
+        // only guard the first connect and miss failures mid-request.
+        $breaker = $this->getCircuitBreaker();
+        if ($breaker === null) {
+            return $this->executeCommandInternal($name, $params);
+        }
+
+        return $breaker->call(fn (): mixed => $this->executeCommandInternal($name, $params));
+    }
+
+    /**
+     * Executes a Redis command on the coroutine-bound connection.
+     */
+    private function executeCommandInternal(string $name, array $params = []): mixed
     {
         $connection = $this->borrow();
         $method = strtolower($name);

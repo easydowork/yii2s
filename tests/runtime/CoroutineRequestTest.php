@@ -99,6 +99,29 @@ class CoroutineRequestTest extends TestCase
         $this->assertSame('http://example.com', $request->getHostInfo());
     }
 
+    public function testServerNameAndPort(): void
+    {
+        $request = new CoroutineRequest(['cookieValidationKey' => 'test']);
+        $request->setSwooleRequest($this->createSwooleRequest([
+            'header' => ['host' => 'example.com'],
+            'server' => ['request_uri' => '/', 'server_port' => '9501'],
+        ]));
+
+        $this->assertSame('example.com', $request->getServerName());
+        $this->assertSame(9501, $request->getServerPort());
+    }
+
+    public function testServerPortFromForwardedHeader(): void
+    {
+        $request = new CoroutineRequest(['cookieValidationKey' => 'test']);
+        $request->setSwooleRequest($this->createSwooleRequest([
+            'header' => ['host' => 'example.com', 'x-forwarded-port' => '443'],
+            'server' => ['request_uri' => '/', 'server_port' => '9501'],
+        ]));
+
+        $this->assertSame(443, $request->getServerPort());
+    }
+
     public function testSecureConnectionDetection(): void
     {
         $request = new CoroutineRequest(['cookieValidationKey' => 'test']);

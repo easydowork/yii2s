@@ -368,6 +368,13 @@ class CoroutineDbConnection extends Connection implements HasConnectionPool
             'attributes' => $this->attributes,
             'emulatePrepare' => $this->emulatePrepare,
             'pdoClass' => $this->pdoClass,
+            // Read/write split (masters/slaves) must be carried over, otherwise
+            // a configured replication setup silently degrades to a single DSN.
+            'masters' => $this->masters,
+            'slaves' => $this->slaves,
+            'masterConfig' => $this->masterConfig,
+            'slaveConfig' => $this->slaveConfig,
+            'enableSlaves' => $this->enableSlaves,
             'enableSchemaCache' => $this->enableSchemaCache,
             'schemaCache' => $this->schemaCache,
             'schemaCacheDuration' => $this->schemaCacheDuration,
