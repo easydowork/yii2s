@@ -119,4 +119,35 @@ class CoroutineRedisCacheTest extends TestCase
             $this->assertFalse($cache->offsetExists('arr-key'));
         });
     }
+
+    public function testGetOrSetSingleFlightUnderConcurrency(): void
+    {
+        $this->runInCoroutine(function (): void {
+            // A unique key avoids a warm-up delete(), which would hold a pooled
+            // connection in this (root) coroutine and leave only 19 for the 20
+            // workers - tripping the pool's max on a false positive.
+            $key = 'single-flight-' . uniqid();
+
+            $counter = 0;
+            $done = new \Swoole\Coroutine\Channel(20);
+
+            for ($i = 0; $i < 20; $i++) {
+                \Swoole\Coroutine::create(function () use ($done, $key, &$counter): void {
+                    $value = Yii::$app->cache->getOrSet($key, function () use (&$counter): string {
+                        $counter++;
+                        \Swoole\Coroutine::sleep(0.1); // simulate a slow callback
+
+                        return 'computed';
+                    }, 30);
+                    $done->push($value);
+                });
+            }
+
+            for ($i = 0; $i < 20; $i++) {
+                $this->assertSame('computed', $done->pop(5));
+            }
+
+            $this->assertSame(1, $counter, 'the callback must run only once under a concurrent miss');
+        });
+    }
 }

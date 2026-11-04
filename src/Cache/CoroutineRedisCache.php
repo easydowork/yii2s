@@ -46,9 +46,67 @@ class CoroutineRedisCache extends Cache
         $this->redis = Instance::ensure($this->redis, CoroutineRedisConnection::class);
     }
 
+    /**
+     * Single-flight [[getOrSet]]: on a cache miss a short lock is taken, so a
+     * burst of concurrent requests on a cold cache runs the callback **once**
+     * and the rest wait for the freshly cached value - instead of every request
+     * running the (expensive) callback at once (the "thundering herd").
+     *
+     * {@inheritdoc}
+     */
+    public function getOrSet($key, $callable, $duration = null, $dependency = null)
+    {
+        $value = $this->get($key);
+        if ($value !== false) {
+            return $value;
+        }
+
+        $lockKey = $key . ':lock';
+        $lockTtl = 10;
+        $acquired = $this->add($lockKey, '1', $lockTtl);
+
+        if (!$acquired) {
+            // Another coroutine is computing; wait for it to publish the value.
+            $deadline = microtime(true) + $lockTtl;
+            while (microtime(true) < $deadline) {
+                $this->sleepForLockRetry();
+                $value = $this->get($key);
+                if ($value !== false) {
+                    return $value;
+                }
+            }
+            // The lock holder failed (or overran the TTL); compute it ourselves.
+        }
+
+        try {
+            $value = call_user_func($callable, $this);
+            if (!$this->set($key, $value, $duration, $dependency)) {
+                \Yii::warning('Failed to set cache value for key ' . json_encode($key), __METHOD__);
+            }
+        } finally {
+            if ($acquired) {
+                $this->delete($lockKey);
+            }
+        }
+
+        return $value;
+    }
+
     protected function getValue($key): mixed
     {
         return $this->redis->executeCommand('GET', [$key]);
+    }
+
+    /**
+     * Yields between lock-retry polls without blocking the worker.
+     */
+    private function sleepForLockRetry(): void
+    {
+        if (\Swoole\Coroutine::getCid() > 0) {
+            \Swoole\Coroutine::sleep(0.05);
+        } else {
+            usleep(50_000);
+        }
     }
 
     protected function setValue($key, $value, $duration): bool

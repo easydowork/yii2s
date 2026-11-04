@@ -67,6 +67,7 @@ $config = [
         'swooleHttpServer' => [
             'class' => \Yii2S\Swoole\Server\HttpServer::class,
             'documentRoot' => '@app/web',
+            'prewarmConnections' => 2,
             // Covers are limited to 2 MB in the controller; the request body
             // must be a bit larger to let that validation run (default 2 MB).
             'settings' => ['package_max_length' => 8 * 1024 * 1024],

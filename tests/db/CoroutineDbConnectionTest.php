@@ -222,4 +222,41 @@ class CoroutineDbConnectionTest extends DatabaseTestCase
             $db->release();
         });
     }
+
+    public function testSlowQueryIsLogged(): void
+    {
+        $db = $this->getConnection(false, false);
+        $db->slowQueryThreshold = 0.05;
+
+        $this->runInCoroutine(function () use ($db): void {
+            \Yii::getLogger()->messages = [];
+            $db->createCommand('SELECT SLEEP(0.2)')->queryScalar();
+
+            $this->assertTrue($this->hasSlowQueryLog(), 'a slow query must be logged');
+        });
+    }
+
+    public function testFastQueryIsNotLogged(): void
+    {
+        $db = $this->getConnection(false, false);
+        $db->slowQueryThreshold = 1.0;
+
+        $this->runInCoroutine(function () use ($db): void {
+            \Yii::getLogger()->messages = [];
+            $db->createCommand('SELECT 1')->queryScalar();
+
+            $this->assertFalse($this->hasSlowQueryLog(), 'a fast query must not be logged');
+        });
+    }
+
+    private function hasSlowQueryLog(): bool
+    {
+        foreach (\Yii::getLogger()->messages as $message) {
+            if (str_contains((string) $message[0], 'Slow query')) {
+                return true;
+            }
+        }
+
+        return false;
+    }
 }

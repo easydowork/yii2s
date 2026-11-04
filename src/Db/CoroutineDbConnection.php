@@ -73,6 +73,12 @@ class CoroutineDbConnection extends Connection implements HasConnectionPool
     public float $poolIdleTimeout = ConnectionPool::DEFAULT_IDLE_TIMEOUT;
 
     /**
+     * @var float log DB statements slower than this many seconds via
+     * `Yii::warning` (category `yii2s.db.slow`). 0 disables slow-query logging.
+     */
+    public float $slowQueryThreshold = 0.0;
+
+    /**
      * @var bool whether to guard command execution with a circuit breaker: after
      * [[circuitFailureThreshold]] consecutive connection-loss failures it fails
      * fast with [[CircuitOpenException]] (or a fallback) for [[circuitCooldown]]

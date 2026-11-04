@@ -54,6 +54,7 @@ class CoroutineCommand extends Command
 
     protected function queryInternal($method, $fetchMode = null)
     {
+        $start = hrtime(true);
         try {
             // queryInternal() is the single choke point for every statement
             // (execute/queryAll/queryScalar/...), so the circuit breaker wraps
@@ -62,7 +63,35 @@ class CoroutineCommand extends Command
         } catch (\Throwable $e) {
             $this->discardIfConnectionLost($e);
             throw $e;
+        } finally {
+            $this->logSlowQuery($start);
         }
+    }
+
+    /**
+     * Logs a warning when the statement exceeded the owner's slow-query
+     * threshold. Runs in `finally` so slow queries are reported even when they
+     * throw.
+     */
+    private function logSlowQuery(float $start): void
+    {
+        $owner = $this->owner;
+        if ($owner === null || $owner->slowQueryThreshold <= 0.0) {
+            return;
+        }
+
+        $duration = (hrtime(true) - $start) / 1_000_000_000.0;
+        if ($duration < $owner->slowQueryThreshold) {
+            return;
+        }
+
+        try {
+            $sql = $this->getRawSql();
+        } catch (\Throwable) {
+            $sql = (string) ($this->sql ?? '');
+        }
+
+        \Yii::warning(sprintf('Slow query (%.3fs): %s', $duration, $sql), 'yii2s.db.slow');
     }
 
     /**
