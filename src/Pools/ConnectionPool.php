@@ -210,6 +210,13 @@ class ConnectionPool
      */
     public function sweep(): int
     {
+        // Fast path: nothing borrowed, nothing to reclaim. Avoids the
+        // listCoroutines() scan, which is per-request overhead on stateless
+        // endpoints that never borrow a connection.
+        if ($this->borrowed === []) {
+            return 0;
+        }
+
         $alive = [];
         foreach (\Swoole\Coroutine::listCoroutines() as $cid) {
             $alive[$cid] = true;
