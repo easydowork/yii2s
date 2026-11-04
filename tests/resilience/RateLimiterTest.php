@@ -40,4 +40,30 @@ class RateLimiterTest extends TestCase
         $this->expectException(\InvalidArgumentException::class);
         $limiter->allow('test', 0, 60);
     }
+
+    public function testConcurrentAllowIsAccurate(): void
+    {
+        $redis = new CoroutineRedisConnection(['hostname' => '127.0.0.1', 'port' => 6379]);
+        $limiter = new RateLimiter($redis, 'yii2s:test:ratelimit:');
+
+        $this->runInCoroutine(function () use ($limiter): void {
+            $key = 'test-concurrent-' . uniqid();
+            $done = new \Swoole\Coroutine\Channel(20);
+
+            for ($i = 0; $i < 20; $i++) {
+                \Swoole\Coroutine::create(function () use ($limiter, $key, $done): void {
+                    $done->push($limiter->allow($key, 10, 60));
+                });
+            }
+
+            $allowed = 0;
+            for ($i = 0; $i < 20; $i++) {
+                if ($done->pop(5) === true) {
+                    $allowed++;
+                }
+            }
+
+            $this->assertSame(10, $allowed, 'exactly `limit` requests must be allowed under concurrency');
+        });
+    }
 }
