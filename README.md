@@ -439,7 +439,7 @@ stopwaitsecs=25                ; 必须大于 gracefulTimeout(10s)，留出排�
 ## 开发与测试
 
 目标平台 Linux；测试可在 Linux 与 macOS（swoole-cli）上完整运行，
-全量 **205 tests / 842 assertions**（2 skipped）全绿。
+全量 **207 tests / 844 assertions**（2 skipped）全绿。
 
 ```bash
 composer test    # PHPUnit（需要本地 MySQL/Redis）

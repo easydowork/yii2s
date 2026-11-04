@@ -399,18 +399,23 @@ class RequestDispatcher implements RequestDispatcherInterface
     {
         // Exceptions never reach Yii's own error handler here (the request is
         // handled manually), so log them explicitly - otherwise failed
-        // requests leave no trace in the application log.
+        // requests leave no trace in the application log. Client errors (4xx)
+        // are warnings, server errors (5xx) are errors, so `error` level stays
+        // reserved for things that actually need attention.
+        $statusCode = $this->resolveStatusCode($exception);
         try {
-            Yii::error(
-                sprintf(
-                    'Unhandled request exception: %s: %s in %s:%d',
-                    $exception::class,
-                    $exception->getMessage(),
-                    $exception->getFile(),
-                    $exception->getLine()
-                ),
-                __METHOD__
+            $message = sprintf(
+                'Unhandled request exception: %s: %s in %s:%d',
+                $exception::class,
+                $exception->getMessage(),
+                $exception->getFile(),
+                $exception->getLine()
             );
+            if ($statusCode >= 500) {
+                Yii::error($message, __METHOD__);
+            } else {
+                Yii::warning($message, __METHOD__);
+            }
         } catch (Throwable) {
             // Logging must never mask the response.
         }

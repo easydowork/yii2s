@@ -94,7 +94,7 @@ class CrontabDispatcher
             'h' => 3600,
         };
 
-        return $now % $interval === 0;
+        return $interval > 0 && $now % $interval === 0;
     }
 
     /**
@@ -115,11 +115,16 @@ class CrontabDispatcher
             'w' => (int) date('w', $now), // weekday 0-6 (Sunday = 0)
         ];
 
+        // Standard cron allows both 0 and 7 for Sunday; date('w') only ever
+        // returns 0, so also accept a literal 7 on Sundays.
+        $weekdayDue = $this->matches($fields[4], $parts['w'], 0, 6)
+            || ($parts['w'] === 0 && $this->matches($fields[4], 7, 7, 7));
+
         return $this->matches($fields[0], $parts['i'], 0, 59)
             && $this->matches($fields[1], $parts['G'], 0, 23)
             && $this->matches($fields[2], $parts['j'], 1, 31)
             && $this->matches($fields[3], $parts['n'], 1, 12)
-            && $this->matches($fields[4], $parts['w'], 0, 6);
+            && $weekdayDue;
     }
 
     /**

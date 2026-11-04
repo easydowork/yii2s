@@ -72,4 +72,30 @@ class CrontabDispatcherTest extends TestCase
 
         $this->assertSame(1, $runs);
     }
+
+    public function testZeroIntervalDoesNotDivideByZero(): void
+    {
+        $dispatcher = new CrontabDispatcher();
+        $runs = 0;
+        $dispatcher->add(new Crontab('job', '@every 0s', function () use (&$runs): void {
+            $runs++;
+        }));
+
+        // Must not throw a DivisionByZeroError; an invalid rule never fires.
+        $dispatcher->tick(100);
+        $this->assertSame(0, $runs);
+    }
+
+    public function testSundayCronAlias(): void
+    {
+        $dispatcher = new CrontabDispatcher();
+        $runs = 0;
+        $dispatcher->add(new Crontab('job', '* * * * 7', function () use (&$runs): void {
+            $runs++;
+        }));
+
+        // 2026-01-04 is a Sunday; cron weekday 7 is the Sunday alias.
+        $dispatcher->tick(strtotime('2026-01-04 12:00:00'));
+        $this->assertSame(1, $runs);
+    }
 }
