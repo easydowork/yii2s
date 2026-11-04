@@ -213,6 +213,9 @@ php yii swoole/start        # 就这么跑起来了
     'enableCircuitBreaker' => true,   // 熔断：连续连接失败后快速失败
     'circuitFailureThreshold' => 5,
     'circuitCooldown' => 30,
+    'enableSchemaCache' => true,      // 表结构缓存：information_schema 只查一次
+    'schemaCache' => 'cache',         // 指向一个协程 Redis 缓存组件
+    'schemaCacheDuration' => 3600,    // 表结构缓存有效期秒
 ],
 'redis' => [
     'class' => \Yii2S\Swoole\Redis\CoroutineRedisConnection::class,

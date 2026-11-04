@@ -17,7 +17,15 @@ $config = [
         '@npm' => '@vendor/npm-asset',
     ],
     'components' => [
-        'db' => array_merge($common['components']['db'], ['enableCoroutinePooling' => true]),
+        // Schema cache: Yii2 otherwise re-queries information_schema for table
+        // metadata (columns + foreign keys) on every cold request. Caching it in
+        // Redis makes those lookups hit once across all workers and restarts.
+        'db' => array_merge($common['components']['db'], [
+            'enableCoroutinePooling' => true,
+            'enableSchemaCache' => true,
+            'schemaCache' => 'cache',
+            'schemaCacheDuration' => 3600,
+        ]),
         'request' => [
             'cookieValidationKey' => 'blog-demo-validation-key',
         ],
