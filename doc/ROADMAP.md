@@ -67,7 +67,7 @@
 
 | 项 | 状态 | 目标 | 验收标准 |
 |---|---|---|---|
-| **dispatcher 中间件化** | ⬜ | static/raw/metrics/error/prewarm 抽成链，职责清晰、可单测 | 现有 server 套件不回归 |
+| **dispatcher 中间件化** | ✅ | static/raw/metrics 抽成中间件链，职责清晰、可单测 | 现有 server 套件 + blog smoke 不回归（194 测试全绿） |
 | **`renderExceptionResponse` 加固** | ✅ | 错误动作再抛异常时路径更稳 | 兜底 `end()` 包 try/catch，响应已部分写入也不会再抛 |
 | **发布** | ⬜ | tag + Packagist + 版本冻结 + 升级指南 | 可 `composer require` 到固定版本 |
 
