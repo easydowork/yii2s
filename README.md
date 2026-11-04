@@ -466,6 +466,7 @@ bash scripts/bench.sh
 | `coding-standard` | php-cs-fixer |
 
 压测章节、组件替换对照表、踩坑记录见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md)；
+组件清单与 API 参考见 [`doc/COMPONENTS.md`](doc/COMPONENTS.md)；
 质量硬化路线图见 [`doc/ROADMAP.md`](doc/ROADMAP.md)。
 
 ## License
