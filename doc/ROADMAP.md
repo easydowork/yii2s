@@ -61,7 +61,7 @@
 |---|---|---|---|
 | **多实例进程模型定案** | ⏸️ | `worker_num` 已作为默认多核方案落地；多 master（滚动重启/故障隔离）是否引入仍待定 | 多 master 场景**待单独讨论后再落地**（见 §5） |
 | **路由缓存 `CoroutineUrlManager`** | ⬜ | per-process 数组缓存路由解析，规则多时省 30%+ | 压测对比：规则多场景 QPS 提升、无内存泄漏 |
-| **慢查询/慢请求日志** | ⬜ | DB 查询耗时超阈值记日志 | 阈值可配；注入慢查询能命中日志 |
+| **慢查询/慢请求日志** | ✅ | DB 查询耗时超阈值记日志 | `CoroutineDbConnection::$slowQueryThreshold` + `CoroutineCommand` 计时，`SELECT SLEEP` 注入测试命中 |
 
 ### P2 · 打磨
 
@@ -76,6 +76,14 @@
 | 项 | 状态 | 说明 |
 |---|---|---|
 | **DB 连接断线毒化池** | ✅ | MySQL 重启后死连接被反复复用；`CoroutineCommand` 检测 08SQLSTATE/2006/2013 并 discard，`KILL CONNECTION` 集成测试钉死 |
+| **冷启动连接风暴致并发失败** | ✅ | macOS 下冷池 + 50 并发建立连接触发 Swoole `send()` EMSGSIZE（"Message too long"），约 60% 请求超时；`prewarmConnections` 预热池后 50 并发全 200 |
+| **冷缓存 thundering herd** | ✅ | 冷缓存 + 并发 miss 时 N 个请求同时跑回调（重复查 DB）；`CoroutineRedisCache::getOrSet` 加单飞锁（`SET NX`），并发下回调只执行一次（测试钉死） |
+
+### 已知边界（设计取舍，暂不修复）
+
+| 项 | 说明 |
+|---|---|
+| **会话 last-write-wins** | Redis 会话无锁，同 session 并发写会互相覆盖（flash/身份变更可能丢）；需要更强隔离时用「有锁会话」或业务侧串行化 |
 
 ---
 
@@ -91,7 +99,7 @@
 - [x] 4h soak 实跑（2.02 亿请求 0 错误、RSS 平台、池零泄漏，日志 `/tmp/yii2s-soak-4h.log`）
 - [ ] 24h soak 实跑，记录 RSS/池基线
 - [ ] 提交本阶段成果（DB 自愈 + 观测 + 池健康 + 熔断 + soak）
-- [ ] 慢查询/慢请求日志
+- [x] 慢查询/慢请求日志
 
 **验收**：24h soak 出具「无泄漏」曲线；重启/断连后自动恢复有测试覆盖；故障注入下行为可预期。
 
