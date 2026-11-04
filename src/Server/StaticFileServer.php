@@ -160,10 +160,79 @@ class StaticFileServer
             return false;
         }
 
-        $swooleResponse->status(200);
+        $size = (int) filesize($file);
+        $method = strtoupper((string) ($swooleRequest->server['request_method'] ?? 'GET'));
+
         $swooleResponse->header('Content-Type', self::DEFAULT_MIME_TYPES[$extension] ?? 'application/octet-stream');
         $swooleResponse->header('Cache-Control', 'public, max-age=' . $this->maxAge);
+        $swooleResponse->header('Accept-Ranges', 'bytes');
+
+        // HEAD: headers only, no body (sendfile() would emit the whole file).
+        if ($method === 'HEAD') {
+            $swooleResponse->header('Content-Length', (string) $size);
+            $swooleResponse->status(200);
+            $swooleResponse->end();
+
+            return true;
+        }
+
+        // Range requests (single byte range, e.g. `bytes=0-9`).
+        if ($this->serveRange($swooleResponse, $file, (string) ($swooleRequest->header['range'] ?? ''), $size)) {
+            return true;
+        }
+
+        $swooleResponse->header('Content-Length', (string) $size);
+        $swooleResponse->status(200);
         $swooleResponse->sendfile($file);
+
+        return true;
+    }
+
+    /**
+     * Serves a single byte range as 206 Partial Content.
+     *
+     * Supports `bytes=start-end`, `bytes=start-` and the suffix form
+     * `bytes=-N` (last N bytes). Anything else falls back to the full
+     * response.
+     *
+     * @return bool true when the range was served
+     */
+    private function serveRange(Response $swooleResponse, string $file, string $header, int $size): bool
+    {
+        if ($header === '' || !preg_match('/^bytes=(\d*)-(\d*)$/', trim($header), $m)) {
+            return false;
+        }
+
+        if ($m[1] === '' && $m[2] === '') {
+            return false;
+        }
+
+        if ($m[1] === '') {
+            // Suffix range: the last N bytes (e.g. `bytes=-500`).
+            $length = (int) $m[2];
+            if ($length <= 0) {
+                return false;
+            }
+            $length = min($length, $size);
+            $offset = $size - $length;
+        } else {
+            $offset = (int) $m[1];
+            $end = $m[2] === '' ? $size - 1 : (int) $m[2];
+            if ($offset > $end || $offset >= $size) {
+                return false; // unsatisfiable: fall back to the full response
+            }
+            $end = min($end, $size - 1);
+            $length = $end - $offset + 1;
+        }
+
+        if ($length <= 0) {
+            return false;
+        }
+
+        $swooleResponse->status(206);
+        $swooleResponse->header('Content-Range', sprintf('bytes %d-%d/%d', $offset, $offset + $length - 1, $size));
+        $swooleResponse->header('Content-Length', (string) $length);
+        $swooleResponse->sendfile($file, $offset, $length);
 
         return true;
     }

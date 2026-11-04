@@ -92,4 +92,47 @@ class HttpServerStaticTest extends ServerTestCase
             @unlink($this->docRoot . '/.env');
         }
     }
+
+    public function testHeadRequestReturnsHeadersWithoutBody(): void
+    {
+        $this->runInCoroutine(function (): void {
+            $this->startServer(__DIR__ . '/../data/app.php', [
+                'server' => ['documentRoot' => $this->docRoot],
+            ]);
+            try {
+                $head = $this->http('HEAD', '/css/app.css');
+                $this->assertSame(200, $head['status']);
+                $this->assertSame('', $head['body'], 'HEAD must not send a body');
+                $this->assertSame('text/css; charset=utf-8', (string) ($head['headers']['content-type'] ?? ''));
+                // Note: the server DOES send Content-Length for HEAD (verified
+                // via curl); Swoole\Coroutine\Http\Client just does not expose
+                // it for body-less responses, so it is not asserted here.
+            } finally {
+                $this->stopServer();
+            }
+        });
+    }
+
+    public function testRangeRequestReturnsPartialContent(): void
+    {
+        $this->runInCoroutine(function (): void {
+            $this->startServer(__DIR__ . '/../data/app.php', [
+                'server' => ['documentRoot' => $this->docRoot],
+            ]);
+            try {
+                $range = $this->http('GET', '/css/app.css', ['Range' => 'bytes=0-3']);
+                $this->assertSame(206, $range['status']);
+                $this->assertSame('body', $range['body'], 'the first 4 bytes must be returned');
+                $this->assertSame('bytes 0-3/20', (string) ($range['headers']['content-range'] ?? ''));
+
+                // Suffix range: the last 5 bytes.
+                $suffix = $this->http('GET', '/css/app.css', ['Range' => 'bytes=-5']);
+                $this->assertSame(206, $suffix['status']);
+                $this->assertSame('ed; }', $suffix['body']);
+                $this->assertSame('bytes 15-19/20', (string) ($suffix['headers']['content-range'] ?? ''));
+            } finally {
+                $this->stopServer();
+            }
+        });
+    }
 }

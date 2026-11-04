@@ -24,19 +24,33 @@
 </head>
 <body>
 <?php $this->beginBody() ?>
+<?php
+// The nav (identity) and flash messages both read the session, which is
+// Redis-backed. When Redis is down the error page itself must still render,
+// so resolve them defensively and fall back to a guest nav + no flash.
+try {
+    $guest = Yii::$app->user->getIsGuest();
+    $identity = $guest ? null : Yii::$app->user->getIdentity();
+    $flashes = Yii::$app->session->getAllFlashes();
+} catch (\Throwable $e) {
+    $guest = true;
+    $identity = null;
+    $flashes = [];
+}
+?>
 <nav>
     <?= Html::a('Home', ['/site/index']) ?>
     <?= Html::a('Vue SPA', ['/site/vue']) ?>
-    <?php if (Yii::$app->user->getIsGuest()): ?>
+    <?php if ($guest): ?>
         <?= Html::a('Login', ['/admin/default/login']) ?>
     <?php else: ?>
         <?= Html::a('Admin', ['/admin/post/index']) ?>
         <?= Html::a('Comments', ['/admin/comment/index']) ?>
-        <?= Html::a('Logout (' . Html::encode(Yii::$app->user->getIdentity()->username) . ')', ['/admin/default/logout'], ['data-method' => 'post']) ?>
+        <?= Html::a('Logout (' . Html::encode($identity->username) . ')', ['/admin/default/logout'], ['data-method' => 'post']) ?>
     <?php endif; ?>
 </nav>
 <hr>
-<?php foreach (Yii::$app->session->getAllFlashes() as $type => $message): ?>
+<?php foreach ($flashes as $type => $message): ?>
     <div class="flash flash-<?= Html::encode((string) $type) ?>"><?= Html::encode(is_array($message) ? implode(' ', $message) : (string) $message) ?></div>
 <?php endforeach; ?>
 <?= $content ?>
