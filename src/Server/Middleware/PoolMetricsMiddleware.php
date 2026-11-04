@@ -10,42 +10,31 @@ declare(strict_types=1);
 
 namespace Yii2S\Swoole\Server\Middleware;
 
-use Swoole\Http\Request;
 use Swoole\Http\Response;
-use Throwable;
 use Yii2S\Swoole\Pools\ConnectionPool;
 
 /**
  * Serves the connection pool metrics debug endpoint. Only reads pool state and
  * never borrows a connection.
  */
-final class PoolMetricsMiddleware implements Middleware
+final class PoolMetricsMiddleware extends AbstractMetricsMiddleware
 {
     /**
      * @param \Closure(): array<string, ConnectionPool> $poolCollector
      */
     public function __construct(
-        private bool $enabled,
-        private string $path,
-        private \Closure $poolCollector,
+        bool $enabled,
+        string $path,
+        \Closure $poolCollector,
     ) {
+        parent::__construct($enabled, $path, $poolCollector, true);
     }
 
-    public function process(Request $request, Response $response, string $path): bool
+    /**
+     * @param array<string, mixed> $pools
+     */
+    protected function render(Response $response, array $pools): bool
     {
-        if (!$this->enabled || rtrim($path, '/') !== $this->path) {
-            return false;
-        }
-
-        $pools = [];
-        foreach (($this->poolCollector)() as $id => $pool) {
-            try {
-                $pools[$id] = $pool->getMetrics();
-            } catch (Throwable $e) {
-                $pools[$id] = ['error' => $e->getMessage()];
-            }
-        }
-
         if ($response->isWritable()) {
             $response->status(200);
             $response->header('Content-Type', 'application/json');

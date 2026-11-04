@@ -199,12 +199,7 @@ class CoroutineRedisQueue extends Component
      */
     private function idle(float $seconds): void
     {
-        if (\Swoole\Coroutine::getCid() === -1) {
-            usleep((int) round($seconds * 1_000_000));
-            return;
-        }
-
-        \Swoole\Coroutine::sleep($seconds);
+        \Yii2S\Swoole\Coroutine\Sleep::sleep($seconds);
     }
 
     /**

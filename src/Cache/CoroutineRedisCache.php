@@ -102,11 +102,7 @@ class CoroutineRedisCache extends Cache
      */
     private function sleepForLockRetry(): void
     {
-        if (\Swoole\Coroutine::getCid() > 0) {
-            \Swoole\Coroutine::sleep(0.05);
-        } else {
-            usleep(50_000);
-        }
+        \Yii2S\Swoole\Coroutine\Sleep::sleep(0.05);
     }
 
     protected function setValue($key, $value, $duration): bool

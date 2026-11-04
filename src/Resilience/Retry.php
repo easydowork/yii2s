@@ -76,10 +76,6 @@ class Retry
 
     private function sleep(float $seconds): void
     {
-        if (\Swoole\Coroutine::getCid() > 0) {
-            \Swoole\Coroutine::sleep($seconds);
-        } else {
-            usleep((int) ($seconds * 1_000_000));
-        }
+        \Yii2S\Swoole\Coroutine\Sleep::sleep($seconds);
     }
 }
