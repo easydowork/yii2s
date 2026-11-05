@@ -88,14 +88,14 @@ home=$(curl -sS --max-time 15 "$BASE_URL/")
 # The newest five posts are on page 1 - the seeded post may have been pushed
 # to page 2 by the posts this script created, so only assert the list renders.
 contains "home lists posts" "/site/view?id=" "$home"
-contains "home shows comment counts" "comments" "$home"
+contains "home shows comment counts" "条评论" "$home"
 
 code=$(status "$BASE_URL/site/view?id=1")
 expect "GET /site/view?id=1 returns 200" "200" "$code"
 view=$(curl -sS --max-time 15 "$BASE_URL/site/view?id=1")
 contains "detail page renders the seeded post" "Hello Swoole" "$view"
-contains "detail page renders comments" "Comments" "$view"
-contains "detail page shows the view counter" "views" "$view"
+contains "detail page renders comments" "评论" "$view"
+contains "detail page shows the view counter" "次浏览" "$view"
 
 code=$(status "$BASE_URL/site/nope")
 expect "unknown route returns 404" "404" "$code"

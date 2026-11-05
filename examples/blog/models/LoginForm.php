@@ -29,6 +29,11 @@ class LoginForm extends Model
         $user = $this->getUser();
         if ($user === null || !$user->validatePassword($this->password)) {
             $this->addError($attribute, 'Incorrect username or password.');
+
+            return;
+        }
+        if ($user->isDisabled()) {
+            $this->addError($attribute, 'This account has been disabled.');
         }
     }
 

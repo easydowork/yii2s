@@ -55,12 +55,40 @@ $config = [
         'urlManager' => [
             'enablePrettyUrl' => true,
             'showScriptName' => false,
+            // Normalize trailing slashes so /admin/ resolves like /admin.
+            'normalizer' => [
+                'class' => \yii\web\UrlNormalizer::class,
+                'action' => \yii\web\UrlNormalizer::ACTION_REDIRECT_PERMANENT,
+            ],
             'rules' => [
+                // Public front pages
+                'GET signup' => 'site/signup',
+                'POST signup' => 'site/signup',
+                // Vue3 admin SPA entry
+                'GET admin' => 'admin/default/vue',
+                // Public JSON API (read-only for guests, writes need X-Api-Key)
                 'GET api/posts' => 'api/post/index',
                 'POST api/posts' => 'api/post/create',
                 'GET api/posts/<id:\d+>' => 'api/post/view',
                 'PUT,PATCH api/posts/<id:\d+>' => 'api/post/update',
                 'DELETE api/posts/<id:\d+>' => 'api/post/delete',
+                // Admin JSON API (session + CSRF, powers the Vue SPA)
+                'POST api/admin/login' => 'api/admin/login',
+                'POST api/admin/logout' => 'api/admin/logout',
+                'GET api/admin/me' => 'api/admin/me',
+                'GET api/admin/dashboard' => 'api/admin/dashboard',
+                'GET api/admin/posts' => 'api/admin/posts',
+                'GET api/admin/posts/<id:\d+>' => 'api/admin/post-view',
+                'POST api/admin/posts' => 'api/admin/post-create',
+                'PUT,PATCH api/admin/posts/<id:\d+>' => 'api/admin/post-update',
+                'DELETE api/admin/posts/<id:\d+>' => 'api/admin/post-delete',
+                'GET api/admin/comments' => 'api/admin/comments',
+                'POST api/admin/comments/<id:\d+>/approve' => 'api/admin/comment-approve',
+                'DELETE api/admin/comments/<id:\d+>' => 'api/admin/comment-delete',
+                'GET api/admin/users' => 'api/admin/users',
+                'POST api/admin/users' => 'api/admin/user-create',
+                'PUT,PATCH api/admin/users/<id:\d+>' => 'api/admin/user-update',
+                'DELETE api/admin/users/<id:\d+>' => 'api/admin/user-delete',
             ],
         ],
         'log' => [
@@ -79,7 +107,10 @@ $config = [
             // Covers are limited to 2 MB in the controller; the request body
             // must be a bit larger to let that validation run (default 2 MB).
             'settings' => ['package_max_length' => 8 * 1024 * 1024],
-            'dispatcher' => new \Yii2S\Swoole\Server\RequestDispatcher(__DIR__ . '/web.php'),
+            'dispatcher' => new \Yii2S\Swoole\Server\RequestDispatcher(__DIR__ . '/web.php', [
+                'enableMetricsEndpoint' => true,
+                'enablePoolMetricsEndpoint' => true,
+            ]),
         ],
     ],
 ];

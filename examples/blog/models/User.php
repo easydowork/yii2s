@@ -3,19 +3,61 @@
 namespace app\models;
 
 use Yii;
+use yii\db\ActiveQuery;
 use yii\db\ActiveRecord;
 use yii\web\IdentityInterface;
 
+/**
+ * @property int $id
+ * @property string $username
+ * @property string $password_hash
+ * @property string $auth_key
+ * @property string|null $email
+ * @property string $role
+ * @property int $status
+ * @property int $created_at
+ */
 class User extends ActiveRecord implements IdentityInterface
 {
+    public const ROLE_ADMIN = 'admin';
+
+    public const ROLE_EDITOR = 'editor';
+
+    public const ROLE_AUTHOR = 'author';
+
+    public const STATUS_ACTIVE = 1;
+
+    public const STATUS_DISABLED = 0;
+
     public static function tableName(): string
     {
         return '{{%user}}';
     }
 
+    public function rules(): array
+    {
+        return [
+            [['username', 'email'], 'trim'],
+            [['username'], 'required'],
+            [['username'], 'string', 'min' => 3, 'max' => 64],
+            [['username'], 'unique'],
+            [['email'], 'email'],
+            [['email'], 'string', 'max' => 128],
+            [['role'], 'in', 'range' => [self::ROLE_ADMIN, self::ROLE_EDITOR, self::ROLE_AUTHOR]],
+            [['status'], 'in', 'range' => [self::STATUS_ACTIVE, self::STATUS_DISABLED]],
+        ];
+    }
+
+    public function behaviors(): array
+    {
+        return [
+            ['class' => \yii\behaviors\TimestampBehavior::class, 'updatedAtAttribute' => false],
+        ];
+    }
+
     public static function findIdentity($id): ?self
     {
-        return static::findOne($id);
+        return static::findOne(['id' => $id, 'status' => self::STATUS_ACTIVE]);
     }
 
     public static function findIdentityByAccessToken($token, $type = null): ?self
@@ -46,5 +88,44 @@ class User extends ActiveRecord implements IdentityInterface
     public function validatePassword(string $password): bool
     {
         return Yii::$app->security->validatePassword($password, $this->getAttribute('password_hash'));
+    }
+
+    public function setPassword(string $password): void
+    {
+        $this->password_hash = Yii::$app->security->generatePasswordHash($password);
+    }
+
+    public function isAdmin(): bool
+    {
+        return $this->role === self::ROLE_ADMIN;
+    }
+
+    public function isEditor(): bool
+    {
+        return $this->role === self::ROLE_EDITOR || $this->isAdmin();
+    }
+
+    public function isDisabled(): bool
+    {
+        return (int) $this->status !== self::STATUS_ACTIVE;
+    }
+
+    public static function roleOptions(): array
+    {
+        return [
+            self::ROLE_AUTHOR => 'Author',
+            self::ROLE_EDITOR => 'Editor',
+            self::ROLE_ADMIN => 'Admin',
+        ];
+    }
+
+    public function getRoleLabel(): string
+    {
+        return self::roleOptions()[$this->role] ?? $this->role;
+    }
+
+    public function getPosts(): ActiveQuery
+    {
+        return $this->hasMany(Post::class, ['author_id' => 'id']);
     }
 }

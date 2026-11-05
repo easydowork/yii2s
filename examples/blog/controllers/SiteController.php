@@ -5,6 +5,7 @@ namespace app\controllers;
 use app\components\BlogJobs;
 use app\models\Comment;
 use app\models\Post;
+use app\models\RegisterForm;
 use Yii;
 use yii\data\Pagination;
 use yii\web\Controller;
@@ -109,6 +110,26 @@ class SiteController extends Controller
     {
         // Vue3 SPA served as a static file via documentRoot
         return $this->redirect('/vue/index.html');
+    }
+
+    /**
+     * Public signup: a new account starts as an `author` and is logged in.
+     */
+    public function actionSignup()
+    {
+        if (!Yii::$app->user->getIsGuest()) {
+            return $this->redirect(['index']);
+        }
+
+        $model = new RegisterForm();
+        if ($model->load(Yii::$app->request->post()) && ($user = $model->register()) !== null) {
+            Yii::$app->user->login($user, 0);
+            Yii::$app->session->setFlash('success', 'Welcome, ' . $user->username . '! Your account is ready.');
+
+            return $this->redirect(['index']);
+        }
+
+        return $this->render('signup', ['model' => $model]);
     }
 
     /**

@@ -41,6 +41,16 @@ class DefaultController extends Controller
     }
 
     /**
+     * The Vue3 admin SPA (single-page, rendered without the classic layout).
+     */
+    public function actionVue()
+    {
+        $this->layout = false;
+
+        return $this->render('//admin/vue');
+    }
+
+    /**
      * JSON probe used by the smoke test to check identity restoration with
      * normal session cookies, remember-me cookies, and tampered cookies.
      */
