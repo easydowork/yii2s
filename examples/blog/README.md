@@ -37,7 +37,7 @@ bash scripts/smoke.sh
 ```
 
 `composer install` only fetches the demo's pure-PHP dependencies; if the
-system PHP is older than 8.2 add `--ignore-platform-req=php
+system PHP is older than 8.4 add `--ignore-platform-req=php
 --ignore-platform-req=ext-swoole` and run everything through `swoole-cli`.
 
 Demo credentials: **admin / admin123**; API key: `blog-demo-api-key`

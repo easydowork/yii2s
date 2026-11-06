@@ -24,7 +24,7 @@
 
 | 依赖 | 版本 |
 |---|---|
-| PHP | >= 8.2（实测 8.4 / 8.5；Swoole 6 的 PHP 下限即 8.2） |
+| PHP | >= 8.4（实测 8.4 / 8.5） |
 | ext-swoole | ^6.0（Swoole Http Server + 连接池） |
 | yiisoft/yii2 | ^2.0 |
 | MySQL / Redis | 可选，按使用的组件而定 |
@@ -681,7 +681,7 @@ savepoint、并发 AR + 并发事务、Query::batch、协程外 detached 直连�
 | macOS + swoole-cli（进程级 e2e / 基准） | e2e 13 checks / 21769-6790-7459 QPS | start/status/reload respawn/SIGTERM 全过；`/`、`/demo/db`、`/demo/redis`（50 并发 3s，0 错误、池零超时） |
 | Linux + swoole-cli 6.2.2 | 167/741 ✅ | 端到端（start/status/reload respawn/SIGTERM）+ 基准 |
 | Linux + pecl PHP 8.5 / swoole 6.2.4 | 167/741 ✅ | **CI 同源标准构建**（`http_parse_files` 修复的实战检验） |
-| GitHub Actions | pecl 矩阵 PHP 8.2–8.5 | 云端矩阵 |
+| GitHub Actions | pecl 矩阵 PHP 8.4–8.5 | 云端矩阵 |
 
 独立外部 AI 评审四轮（见附录 B）：第一轮 6 缺陷、第二轮 2 项增量、第三轮
 （安全专项）7 处缺陷、第四轮（升级兼容性专项）8 处缺陷，均已修复并由新用例钉死。
@@ -705,7 +705,7 @@ swoole-cli vendor/bin/phpstan analyse --memory-limit=-1
 swoole-cli vendor/bin/php-cs-fixer check --diff
 ```
 
-> 用系统 PHP 拉依赖时若版本低于 8.2，加
+> 用系统 PHP 拉依赖时若版本低于 8.4，加
 > `--ignore-platform-req=php --ignore-platform-req=ext-swoole` 即可完成 `composer install`
 > （依赖本身是纯 PHP；实际运行由 swoole-cli 提供 PHP 8.4 + swoole）。
 > 注意 swoole-cli 内置 curl 访问 Packagist 会崩，装依赖请用系统 PHP 的 composer。

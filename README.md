@@ -31,7 +31,7 @@
 
 | 依赖 | 版本 |
 |---|---|
-| PHP | >= 8.2（实测 8.4 / 8.5；Swoole 6 的 PHP 下限即 8.2） |
+| PHP | >= 8.4（实测 8.4 / 8.5） |
 | ext-swoole | ^6.0（Swoole Http Server + 连接池） |
 | yiisoft/yii2 | ^2.0 |
 | ext-redis | 原生 phpredis，使用 `redis`/`cache`/`session`/`queue` 组件时必需（`yii2-redis` 是纯 PHP 客户端，不提供 `\Redis`） |
@@ -460,7 +460,7 @@ bash scripts/bench.sh
 
 | Job | 覆盖 |
 |---|---|
-| `phpunit` | PHP 8.2–8.5 矩阵 × 真实 MySQL 8 + Redis 7 × pecl swoole 6.2.x，全量用例 |
+| `phpunit` | PHP 8.4–8.5 矩阵 × 真实 MySQL 8 + Redis 7 × pecl swoole 6.2.x，全量用例 |
 | `smoke` | blog demo 端到端（起真实多进程服务器：MVC、错误页、REST API、session+CSRF、上传+静态、CSV 下载、队列、并发） |
 | `static` | PHPStan（`--error-format=github`，PR 上直接标注行号） |
 | `coding-standard` | php-cs-fixer |

@@ -3,7 +3,7 @@
     "description": "Real-world blog scenario built on easydowork/yii2s",
     "type": "project",
     "require": {
-        "php": ">=8.2",
+        "php": ">=8.4",
         "yiisoft/yii2": "^2.0",
         "easydowork/yii2s": "@dev",
         "yiisoft/yii2-redis": "^2.0",
