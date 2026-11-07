@@ -418,9 +418,16 @@ class ConnectionPool
         $recycled = 0;
 
         // Drain the idle channel so every idle connection can be inspected
-        // without racing a concurrent borrow.
+        // without racing a concurrent borrow. Guard with isEmpty() so the
+        // keeper never blocks in pop() when the channel is empty: a blocking
+        // pop() waits on the reactor timer, which a worker exiting mid-pass
+        // would leave stuck (Swoole's "all coroutines asleep - deadlock").
         $idle = [];
-        while (($connection = $this->channel->pop(0.001)) !== false) {
+        while (!$this->channel->isEmpty()) {
+            $connection = $this->channel->pop(0.001);
+            if ($connection === false) {
+                break;
+            }
             $idle[] = $connection;
         }
 

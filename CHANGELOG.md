@@ -7,8 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Same-port `SO_REUSEPORT` multi-instance**: the `enableReusePort` option is
+  gone. Swoole ignores `enable_reuse_port` on macOS, which made the previous
+  "default on" flag silently ineffective during development and only work on
+  Linux - an untested, platform-divergent path. Multi-instance now has a single
+  supported shape: **multi-port + nginx upstream** (each instance its own port
+  and pid file). The `SWOOLE_PID_FILE` env var and the same-port e2e check were
+  removed with it.
+- **`swoole/reload` docs/semantics drift**: the console command had already been
+  switched to Swoole's native SIGUSR1 worker reload (master pid unchanged), but
+  README / DEVELOPMENT / e2e.sh still described the old "stop + respawn"
+  behaviour. Those are now aligned.
+
 ### Fixed
 
+- **Pool-keeper coroutine deadlock on shutdown/reload**: with
+  `poolMaintenanceInterval` set, both the keeper's `while (true) { sleep() }`
+  loop and the idle-drain `Channel::pop()` wait on the reactor timer, which a
+  worker exiting leaves stuck - tripping Swoole's "all coroutines asleep -
+  deadlock" fatal and forcing the worker to be killed (breaking the graceful
+  drain). The loop now runs on a reactor timer (cleared on worker exit) and the
+  idle drain is guarded by `isEmpty()` so it never blocks on an empty channel.
 - **Per-coroutine request-scoped components (critical)**: concurrent requests
   used to share the same `request` / `response` / `session` / `user`
   instances, so one request could read another request's parameters, session

@@ -90,10 +90,6 @@ return [
         'swooleHttpServer' => [
             'class' => \Yii2S\Swoole\Server\HttpServer::class,
             'port' => 9501,
-            // Same-port multi-instance: SO_REUSEPORT is already enabled, but
-            // each process needs its own pid file (otherwise the start guard
-            // rejects the second one). supervisor can pass a per-process path.
-            'pidFile' => getenv('SWOOLE_PID_FILE') ?: null,
             // Periodic connection-pool upkeep (min-idle replenish, max-lifetime
             // recycling, idle keepalive). 0 disables.
             'poolMaintenanceInterval' => 1.0,

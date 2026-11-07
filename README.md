@@ -298,7 +298,7 @@ php yii swoole/start [--host=] [--port=] [--watch]  # 启动（阻塞），写 p
 php yii swoole/status                               # 运行时面板：worker 数/内存/协程数/连接数/请求
 php yii swoole/routes                               # 列出 raw 路由 + urlManager 规则
 php yii swoole/stop                                 # 优雅停机（在途请求排空后退出）
-php yii swoole/reload                               # 停机 + 尽力重新拉起（生产建议交给 supervisor）
+php yii swoole/reload                               # 优雅重载 worker（SIGUSR1：加载新代码，master 不变，在途请求不中断）
 php yii swoole/check                                # 配置体检（Application 隔离、cookie key、prettyUrl、db/redis 探活）
 php yii queue/serve [--limit=N]                     # 队列消费 worker（无限轮询）
 ```
@@ -414,9 +414,8 @@ stopsignal=TERM
 stopwaitsecs=25                ; 必须大于 gracefulTimeout(10s)，留出排空时间
 ```
 
-> 同端口多实例（`SO_REUSEPORT`）**可用**，但每个实例必须有独立的 pid 文件。示例配置已
-> 支持 `SWOOLE_PID_FILE`。nginx upstream、真实客户端 IP（`trustedProxies`）、超时、
-> 上传大小等生产清单见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md) 部署章节。
+> 多实例只推荐「多端口 + nginx upstream」这一种形态；真实客户端 IP（`trustedProxies`）、
+> 超时、上传大小等生产清单见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md) 部署章节。
 
 ## 已知限制
 
@@ -449,7 +448,7 @@ composer test    # PHPUnit（需要本地 MySQL/Redis）
 composer static  # PHPStan level 5
 composer cs      # php-cs-fixer（与官方 yii2 同规则）
 
-# 进程级端到端（start/status/reload respawn/SIGTERM）与基准：
+# 进程级端到端（start/status/reload/SIGTERM）与基准：
 bash scripts/e2e.sh
 bash scripts/bench.sh
 ```

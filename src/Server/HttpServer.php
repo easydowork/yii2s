@@ -234,15 +234,23 @@ class HttpServer extends Component
 
             if ($maintenanceInterval > 0) {
                 // Periodic pool upkeep (max-lifetime recycling, idle keepalive,
-                // min-idle replenishment). Runs forever alongside the worker;
-                // the worker shuts it down on exit.
-                \Swoole\Coroutine::create(static function () use ($dispatcher, $maintenanceInterval): void {
-                    // @phpstan-ignore-next-line intentional infinite loop, runs until the worker exits
-                    while (true) {
-                        \Swoole\Coroutine::sleep($maintenanceInterval);
-                        $dispatcher->maintainPools();
+                // min-idle replenishment). A reactor-level timer is used instead
+                // of a bare `while (true) { sleep() }` coroutine: Swoole clears
+                // its timers when a worker exits, so upkeep stops cleanly on
+                // shutdown/reload instead of leaving a coroutine stuck in
+                // sleep()/pop() and tripping the "all coroutines asleep -
+                // deadlock" fatal (which forced the worker to be killed).
+                \Swoole\Timer::tick(
+                    (int)($maintenanceInterval * 1000),
+                    static function () use ($dispatcher): void {
+                        // Timer callbacks are not guaranteed to run inside a
+                        // coroutine; the pool channel API requires one, so run
+                        // the pass in a short-lived coroutine (it always exits).
+                        \Swoole\Coroutine::create(static function () use ($dispatcher): void {
+                            $dispatcher->maintainPools();
+                        });
                     }
-                });
+                );
             }
         });
 

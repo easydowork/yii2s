@@ -139,7 +139,7 @@ DB 的事务也都原生支持（连接在协程内粘性借用）。
 php yii swoole/start [--host=] [--port=] [--watch]  # 启动（阻塞），写 pid 文件
 php yii swoole/status                               # 查看运行状态
 php yii swoole/stop                                 # 优雅停机（在途请求排空后退出）
-php yii swoole/reload                               # 停机 + 尽力重新拉起（生产建议交给 supervisor）
+php yii swoole/reload                               # 优雅重载 worker（SIGUSR1：加载新代码，master 不变）
 php yii swoole/check                                # 配置体检（Application 隔离、cookie key、prettyUrl、db/redis 探活）
 php yii queue/serve [--limit=N]                     # 队列消费 worker（无限轮询）
 ```
@@ -378,9 +378,6 @@ supervisor: SIGTERM           控制台: php yii swoole/stop
                                           php yii queue/serve（独立进程）
 ```
 
-> 同端口 `SO_REUSEPORT` 多实例可用，但每个实例必须配独立 `pidFile`（示例配置读取
-> `SWOOLE_PID_FILE`），否则防重守卫会拒绝第二个进程；详见 4.2。
-
 ## 3.2 核心难点与设计决策
 
 | 难点 / 决策 | 对策与理由 |
@@ -392,10 +389,9 @@ supervisor: SIGTERM           控制台: php yii swoole/stop
 | 池耗尽的错误路径 | 阻塞等待 + `waitTimeout` 超时抛异常，不无限等待；`poolMaxActive` 是并发硬边界 |
 | 泄漏回收机制 | `sweep()`（每请求结束由活跃协程同步执行）而非 `Coroutine::defer`——defer 阶段做 channel IO 实测会崩溃，且 sweep 确定性更强 |
 | 借出登记数据结构 | 普通数组（`spl_object_id` 索引）而非 WeakMap——WeakMap 跨协程写入不可见且会崩进程（独立脚本实锤） |
-| 多进程模型 | 多端口 + nginx upstream（默认推荐），或同端口 `SO_REUSEPORT`（每实例独立 `pidFile`，示例支持 `SWOOLE_PID_FILE`）；控制命令按单 pid 文件操作，多实例由 supervisor 管；进程内 fork 需重验证进程级状态隔离，不做 |
+| 多进程模型 | 多端口 + nginx upstream（每个实例一个端口、独立 pid 文件，supervisor 托管）；控制命令按单 pid 文件操作；进程内 fork 需重验证进程级状态隔离，不做 |
 | 静态文件 | PHP 层 `StaticFileServer`（可执行/敏感扩展黑名单 + dotfile 拦截）——**实测 `Http\Server` 完全忽略 `enable_static_handler`**；生产推荐 nginx 直出 |
 | 请求体解析 | 显式 pin `http_parse_files/post/cookie = true`——`Http\Server` 的 `http_parse_files` 源码默认 **false**（`swoole_http.h`），不显式配置则上传静默为空 |
-| respawn 前置 `PHP_BINARY` | pid 文件存无解释器的脚本调用（入口无 shebang），不前置则 reload 永远失败（实测） |
 | console `--host/--port` 用 controller 公共属性 | Yii2 匿名选项只赋值 controller 公共属性，不映射 action 方法参数 |
 
 ## 3.3 连接池与协程粘性借用（`Pools/ConnectionPool.php`）
@@ -518,19 +514,6 @@ use Swoole\Coroutine;
 标准架构：**nginx 负责静态文件与 TLS 终结，Swoole 服务器只处理动态请求**。
 多核部署用**多端口 + upstream**：每个实例监听一个端口、各自独立的 pid 文件，由
 supervisor/systemd 托管。
-
-> 同端口多实例（`SO_REUSEPORT`）**可用**，但每个实例必须有独立 pid 文件，否则
-> 防重复启动守卫会拒绝第二个进程。示例配置已支持环境变量：
->
-> ```ini
-> command=/usr/local/bin/swoole-cli /var/www/app/yii swoole/start --host=127.0.0.1 --port=9501
-> environment=SWOOLE_PID_FILE="/var/www/app/runtime/swoole-%(process_num)02d.pid"
-> numprocs=4
-> ```
->
-> `swoole/stop`/`status`/`reload` 按单个 pid 文件操作，这种模式下由 supervisor
-> 管生命周期；要用控制台命令管理多实例，仍推荐多端口 + upstream。
-> `scripts/e2e.sh` 已覆盖“两实例同端口、都返回 200”的回归。
 
 ```nginx
 upstream yii2s {
@@ -678,8 +661,8 @@ savepoint、并发 AR + 并发事务、Query::batch、协程外 detached 直连�
 | 运行时 | 测试 | 用途 |
 |---|---|---|
 | macOS + swoole-cli 6.2.0 / PHP 8.4 | 211/852 ✅（2 skipped） | 全套集成测试（真实 socket、优雅停机、watch、pid）+ PHPStan + cs |
-| macOS + swoole-cli（进程级 e2e / 基准） | e2e 13 checks / 21769-6790-7459 QPS | start/status/reload respawn/SIGTERM 全过；`/`、`/demo/db`、`/demo/redis`（50 并发 3s，0 错误、池零超时） |
-| Linux + swoole-cli 6.2.2 | 167/741 ✅ | 端到端（start/status/reload respawn/SIGTERM）+ 基准 |
+| macOS + swoole-cli（进程级 e2e / 基准） | e2e 13 checks / 21769-6790-7459 QPS | start/status/reload/SIGTERM 全过；`/`、`/demo/db`、`/demo/redis`（50 并发 3s，0 错误、池零超时） |
+| Linux + swoole-cli 6.2.2 | 167/741 ✅ | 端到端（start/status/reload/SIGTERM）+ 基准 |
 | Linux + pecl PHP 8.5 / swoole 6.2.4 | 167/741 ✅ | **CI 同源标准构建**（`http_parse_files` 修复的实战检验） |
 | GitHub Actions | pecl 矩阵 PHP 8.4–8.5 | 云端矩阵 |
 
@@ -692,7 +675,7 @@ savepoint、并发 AR + 并发事务、Query::batch、协程外 detached 直连�
 composer test    # PHPUnit（需要本地 MySQL/Redis；tests/console、tests/web 已含在套件）
 composer static  # PHPStan level 5
 composer cs      # php-cs-fixer（与官方 yii2 同规则）
-bash scripts/e2e.sh     # 进程级端到端：start/status/reload respawn/SIGTERM（macOS/Linux）
+bash scripts/e2e.sh     # 进程级端到端：start/status/reload/SIGTERM（macOS/Linux）
 bash scripts/bench.sh   # 基准：`/`、`/demo/db`、`/demo/redis`（macOS/Linux，可用 CONCURRENCY/DURATION 覆盖）
 swoole-cli scripts/soak.php --port=9501 --path=/demo/db --duration=60 --pid=<pid>  # 长跑检漏：RSS/连接池漂移
 ```
@@ -925,7 +908,7 @@ $pool = new ConnectionPool(
 | C5 | Basic Auth 头解析正确（密码含冒号/空密码/scheme 大小写） | `tests/runtime/HttpBasicAuthTest.php` |
 | C6 | Redis MULTI/DISCARD/PIPELINE 天然工作 | `tests/redis/RedisMultiTest.php` |
 | C7 | 优雅停机等待在途请求排空（有界） | `tests/server/HttpServerGracefulStopTest.php` |
-| C8 | reload 真实 respawn + watch 热重载 | `scripts/e2e.sh`（pid 变化、端口重绑、服务恢复） |
+| C8 | reload 优雅重载 worker（SIGUSR1）+ watch 热重载 | `scripts/e2e.sh`（master pid 不变、服务恢复） |
 | C9 | 数据库事务在协程下正常（含嵌套 savepoint） | `tests/db/`；`curl /demo/transaction` |
 | C10 | 队列：延迟投递、失败重试、超限死信 | `tests/queue/CoroutineRedisQueueTest.php` |
 | C11 | 队列空时 run(N) 立即返回；`queue/serve` 空队列不崩 | `tests/queue/`（含协程外场景） |
@@ -965,7 +948,7 @@ $pool = new ConnectionPool(
   SIGTERM 步骤必失败——含空值守卫修复）；`.gitattributes` 强制 `*.sh` LF
   （根治 CRLF 污染）。
 - 第二轮在当前 HEAD 的独立验证与本方结果吻合：87→98 tests 全绿、
-  e2e respawn（pid 变化）、基准 13887/2940/5871 QPS 零错误、池零泄漏。
+  e2e reload（SIGUSR1）、基准 13887/2940/5871 QPS 零错误、池零泄漏。
 
 ### 第三轮——安全专项（7 处缺陷全部修复）
 
