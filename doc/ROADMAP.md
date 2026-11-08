@@ -27,7 +27,7 @@
 | 测试 | 8/10 | 双平台 211/852 全绿 + blog smoke 52 项 Linux 全过；仍缺 24h 实跑基线 |
 | 性能 | 8.5/10 | Linux 12 核实测：纯框架 48551 QPS、`/demo/redis` 29126 QPS、0 错误 |
 | 可运维性 | 7/10 | 已有 `/__pool` + `/metrics` + `swoole/status`；停机死锁噪音已消除；缺 Prometheus 告警接入 |
-| 发布成熟度 | 4/10 | `v1.0.0` 已打 tag；但 tag 之后有修复（待 `v1.0.1`）、无 Packagist/升级指南 |
+| 发布成熟度 | 4/10 | `v1.0.0` 已发布（2026-11-08 重建至 `cd2b0ff`，含 keeper 死锁修复）；缺 Packagist / 升级指南 |
 
 ---
 
@@ -73,7 +73,7 @@
 |---|---|---|---|
 | **dispatcher 中间件化** | ✅ | static/raw/metrics 抽成中间件链，职责清晰、可单测 | 现有 server 套件 + blog smoke 不回归（194 测试全绿） |
 | **`renderExceptionResponse` 加固** | ✅ | 错误动作再抛异常时路径更稳 | 兜底 `end()` 包 try/catch，响应已部分写入也不会再抛 |
-| **发布** | ⬜ | tag + Packagist + 版本冻结 + 升级指南 | 可 `composer require` 到固定版本 |
+| **发布** | 🚧 | `v1.0.0` 已打 tag（2026-11-08 重建至 `cd2b0ff`）；剩 Packagist + 版本冻结 + 升级指南 | 可 `composer require` 到固定版本 |
 
 ### 过程中新发现并已修复
 
@@ -136,8 +136,7 @@
 ### 第三阶段：发布与灰度
 **目标**：版本可控、可升级、有真实业务背书。
 
-- [x] 打 tag（`v1.0.0`，2026-11-05）
-- [ ] 打 `v1.0.1`：包含 `cd2b0ff`（keeper 死锁修复 + SO_REUSEPORT 移除 + reload 对齐），见 §5.3
+- [x] 打 tag（`v1.0.0`，2026-11-08 重建至 `cd2b0ff`，含 keeper 死锁修复 + SO_REUSEPORT 移除 + reload 对齐）
 - [ ] 上 Packagist、版本冻结
 - [ ] 写升级指南（从 FPM 切到 Swoole 的 checklist）
 - [ ] 一个真实业务灰度 ≥1 周，用观测数据决策是否全量
@@ -192,8 +191,8 @@
 
 ### 5.3 发布收尾
 
-- [ ] **打 `v1.0.1`**：`cd2b0ff`（keeper 死锁修复 + SO_REUSEPORT 移除 + reload 对齐）
-  在 `v1.0.0` 之后，按 SemVer 应发补丁版本——否则拉 tag 的用户拿到的仍是带死锁的版本
+- [x] **`v1.0.0` 已重建至 `cd2b0ff`**（2026-11-08）：keeper 死锁修复 + SO_REUSEPORT 移除 +
+  reload 对齐已包含在 tag 内，本地与远端（GitHub）一致——不再需要 `v1.0.1` 补丁版本
 - [ ] 上 Packagist（`composer require easydowork/yii2s` 可用、版本冻结）
 - [ ] 升级指南：FPM → Swoole checklist（`enablePrettyUrl` 必开、禁用 `$_SESSION`/
   `header()` 等超全局、`CoroutineUploadedFile` 替换上传、子协程不继承请求上下文、
