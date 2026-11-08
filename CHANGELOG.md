@@ -102,6 +102,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Swoole server log defaults**: `HttpServer` now maps `log_file` to a
+  per-user runtime file next to the pid file (`swoole-<host>-<port>.log`)
+  with `SWOOLE_LOG_ROTATION_DAILY`, so internal Swoole logs (worker crashes,
+  port conflicts, send failures) survive the session and cannot grow
+  unbounded. `$logFile = false` keeps stdout-only logging (containers), and
+  `$logLevel` exposes the Swoole level. Explicit `settings` keys still win.
+
 - **Connection pool pre-warming**: `HttpServer::$prewarmConnections` (default 0)
   opens that many connections per pool before the server accepts traffic, so a
   restart no longer pays connect/handshake latency on the first requests. Each

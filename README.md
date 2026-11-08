@@ -236,6 +236,11 @@ php yii swoole/start        # 就这么跑起来了
     'documentRoot' => '@app/public',           // 可选：静态文件（开发环境）
     'prewarmConnections' => 2,                // 预热连接池，避免冷启动连接风暴
     'poolMaintenanceInterval' => 30.0,        // 连接池健康 keeper 间隔（0 关闭）
+    // Swoole 内部日志（worker 崩溃/端口冲突/send 失败等）。默认：系统临时目录
+    // yii2s-swoole-<uid>/swoole-<host>-<port>.log + 每日轮转；设为 false 则仅输出
+    // stdout（容器采集场景）；settings 里的 log_file/log_level 键优先级更高
+    'logFile' => '@app/runtime/logs/swoole.log',
+    'logLevel' => SWOOLE_LOG_WARNING,
     'dispatcher' => new \Yii2S\Swoole\Server\RequestDispatcher('@app/config/web.php', [
         'enablePoolMetricsEndpoint' => true,  // /__pool
         'enableMetricsEndpoint' => true,      // /metrics

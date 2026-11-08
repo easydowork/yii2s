@@ -104,6 +104,19 @@ class HttpServer extends Component
      *  requests during a reload/shutdown (mapped to `max_wait_time`) */
     public float $gracefulTimeout = 10.0;
 
+    /** @var string|bool|null Swoole server log file (mapped to `log_file`).
+     *  null (default) resolves to a per-user runtime directory next to the
+     *  pid file, with daily rotation, so internal Swoole logs (worker
+     *  crashes, port conflicts, send failures) survive the session instead
+     *  of vanishing with stdout. Set to `false` to keep stdout-only logging
+     *  (e.g. containers collecting stdout). A `settings[log_file]` key still
+     *  wins over any of this. */
+    public $logFile = null;
+
+    /** @var int|null Swoole log level (one of the `SWOOLE_LOG_*` constants);
+     *  null keeps Swoole's default (INFO). A `settings[log_level]` key wins. */
+    public ?int $logLevel = null;
+
     private ?SwooleHttpServer $server = null;
 
     private bool $isRunning = false;
@@ -133,6 +146,7 @@ class HttpServer extends Component
 
         $this->pidFile = $this->resolveAlias($this->pidFile);
         $this->documentRoot = $this->resolveAlias($this->documentRoot);
+        $this->logFile = $this->resolveAlias($this->logFile);
 
         // Swoole's native static handler is not used: static files are served
         // at the PHP level so cache headers and range support stay ours.
@@ -168,14 +182,23 @@ class HttpServer extends Component
             // symlinked) by another local user; a directory we own prevents
             // both, without requiring a writable @app/runtime from console.
             $path = $this->pidFile
-                ?? sys_get_temp_dir() . DIRECTORY_SEPARATOR
-                    . sprintf('yii2s-swoole-%d', $this->effectiveUid())
+                ?? $this->defaultRuntimeDir()
                     . DIRECTORY_SEPARATOR
                     . sprintf('%s-%d.pid', $this->host, $this->port);
             $this->pidFileManager = new PidFile($path);
         }
 
         return $this->pidFileManager;
+    }
+
+    /**
+     * Per-user runtime directory inside the system temp dir, shared by the
+     * default pid file and the default Swoole log file.
+     */
+    private function defaultRuntimeDir(): string
+    {
+        return sys_get_temp_dir() . DIRECTORY_SEPARATOR
+            . sprintf('yii2s-swoole-%d', $this->effectiveUid());
     }
 
     /**
@@ -324,6 +347,28 @@ class HttpServer extends Component
                 'reload_async' => true,
                 'max_wait_time' => (int) $this->gracefulTimeout,
             ];
+        }
+
+        // Swoole's own logs (worker crashes, port conflicts, send failures)
+        // go to stdout by default: lost with the session when run in the
+        // foreground, buried in the supervisor log otherwise, and unbounded
+        // in either direction. Default to a per-user log file next to the
+        // pid file with daily rotation; `false` keeps stdout-only (e.g.
+        // containers collecting stdout), and user `settings` keys win.
+        if ($this->logFile !== false) {
+            $logFile = $this->logFile
+                ?? $this->defaultRuntimeDir()
+                    . DIRECTORY_SEPARATOR
+                    . sprintf('swoole-%s-%d.log', $this->host, $this->port);
+            if (@mkdir(dirname($logFile), 0770, true) || is_dir(dirname($logFile))) {
+                $this->settings += [
+                    'log_file' => $logFile,
+                    'log_rotation' => SWOOLE_LOG_ROTATION_DAILY,
+                ];
+            }
+        }
+        if ($this->logLevel !== null) {
+            $this->settings += ['log_level' => $this->logLevel];
         }
 
         $server->set($this->settings);
