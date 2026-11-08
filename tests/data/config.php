@@ -23,6 +23,7 @@ $config = [
     'redis' => [
         'hostname' => '127.0.0.1',
         'port' => 6379,
+        'password' => getenv('YII2S_TEST_REDIS_PASSWORD') ?: null,
     ],
 ];
 
