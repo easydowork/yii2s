@@ -16,7 +16,7 @@ $config = [
         'mysql' => [
             'dsn' => 'mysql:host=127.0.0.1;dbname=yii2s_test',
             'username' => 'root',
-            'password' => 'root',
+            'password' => getenv('YII2S_TEST_DB_PASSWORD') ?: 'root',
             'fixture' => __DIR__ . '/mysql.sql',
         ],
     ],

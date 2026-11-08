@@ -18,7 +18,7 @@ class RateLimiterTest extends TestCase
 {
     public function testAllowWithinLimit(): void
     {
-        $redis = new CoroutineRedisConnection(['hostname' => '127.0.0.1', 'port' => 6379]);
+        $redis = new CoroutineRedisConnection(['hostname' => '127.0.0.1', 'port' => 6379, 'password' => getenv('YII2S_TEST_REDIS_PASSWORD') ?: null]);
         $limiter = new RateLimiter($redis, 'yii2s:test:ratelimit:');
 
         $this->runInCoroutine(function () use ($limiter): void {
@@ -34,7 +34,7 @@ class RateLimiterTest extends TestCase
 
     public function testInvalidLimitThrows(): void
     {
-        $redis = new CoroutineRedisConnection(['hostname' => '127.0.0.1', 'port' => 6379]);
+        $redis = new CoroutineRedisConnection(['hostname' => '127.0.0.1', 'port' => 6379, 'password' => getenv('YII2S_TEST_REDIS_PASSWORD') ?: null]);
         $limiter = new RateLimiter($redis, 'yii2s:test:ratelimit:');
 
         $this->expectException(\InvalidArgumentException::class);
@@ -43,7 +43,7 @@ class RateLimiterTest extends TestCase
 
     public function testConcurrentAllowIsAccurate(): void
     {
-        $redis = new CoroutineRedisConnection(['hostname' => '127.0.0.1', 'port' => 6379]);
+        $redis = new CoroutineRedisConnection(['hostname' => '127.0.0.1', 'port' => 6379, 'password' => getenv('YII2S_TEST_REDIS_PASSWORD') ?: null]);
         $limiter = new RateLimiter($redis, 'yii2s:test:ratelimit:');
 
         $this->runInCoroutine(function () use ($limiter): void {

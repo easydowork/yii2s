@@ -41,7 +41,7 @@ return [
             'class' => \yii\db\Connection::class,
             'dsn' => 'mysql:host=127.0.0.1;dbname=yii2s_demo',
             'username' => 'root',
-            'password' => 'root',
+            'password' => getenv('YII2S_TEST_DB_PASSWORD') ?: 'root',
             'charset' => 'utf8mb4',
             // poolMaxActive is the hard cap on concurrent queries; raise it
             // when a request fans out into many parallel sub-queries.
@@ -53,6 +53,7 @@ return [
             'class' => \yii\redis\Connection::class, // swapped by the bootstrap
             'hostname' => '127.0.0.1',
             'port' => 6379,
+            'password' => getenv('YII2S_TEST_REDIS_PASSWORD') ?: null,
             'poolMaxActive' => 20,
             'poolMinIdle' => 2,
         ],

@@ -31,7 +31,7 @@ class BehaviorsEventsTest extends TestCase
         $this->db = new CoroutineDbConnection([
             'dsn' => 'mysql:host=127.0.0.1;dbname=yii2s_test',
             'username' => 'root',
-            'password' => 'root',
+            'password' => getenv('YII2S_TEST_DB_PASSWORD') ?: 'root',
             'charset' => 'utf8mb4',
             'enableCoroutinePooling' => false,   // plain connection for clean transaction testing
         ]);

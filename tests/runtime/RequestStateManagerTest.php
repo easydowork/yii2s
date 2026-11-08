@@ -23,7 +23,7 @@ class RequestStateManagerTest extends TestCase
 {
     public function testCleanupIgnoresQueueReleaseMethod(): void
     {
-        $redis = new CoroutineRedisConnection(['hostname' => '127.0.0.1', 'port' => 6379]);
+        $redis = new CoroutineRedisConnection(['hostname' => '127.0.0.1', 'port' => 6379, 'password' => getenv('YII2S_TEST_REDIS_PASSWORD') ?: null]);
         $queue = new CoroutineRedisQueue([
             'redis' => $redis,
             'channel' => 'test',

@@ -91,7 +91,7 @@ class RequestMetricsTest extends ServerTestCase
 
     public function testAggregatorMergesWorkerSnapshots(): void
     {
-        $redis = new CoroutineRedisConnection(['hostname' => '127.0.0.1', 'port' => 6379]);
+        $redis = new CoroutineRedisConnection(['hostname' => '127.0.0.1', 'port' => 6379, 'password' => getenv('YII2S_TEST_REDIS_PASSWORD') ?: null]);
         $aggregator = new MetricsAggregator($redis, 'yii2s:test:metrics:');
 
         $this->runInCoroutine(function () use ($redis, $aggregator): void {

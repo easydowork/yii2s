@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 try {
-    $pdo = new PDO('mysql:host=127.0.0.1', 'root', 'root', [
+    $pdo = new PDO('mysql:host=127.0.0.1', 'root', getenv('YII2S_TEST_DB_PASSWORD') ?: 'root', [
         PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
     ]);
     $pdo->exec('CREATE DATABASE IF NOT EXISTS yii2s_demo CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci');

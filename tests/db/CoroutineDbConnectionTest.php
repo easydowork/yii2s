@@ -202,7 +202,7 @@ class CoroutineDbConnectionTest extends DatabaseTestCase
         $db = new CoroutineDbConnection([
             'dsn' => 'mysql:host=127.0.0.1;dbname=yii2s_test',
             'username' => 'root',
-            'password' => 'root',
+            'password' => getenv('YII2S_TEST_DB_PASSWORD') ?: 'root',
             'masters' => $masters,
             'slaves' => $slaves,
             'masterConfig' => ['username' => 'root'],

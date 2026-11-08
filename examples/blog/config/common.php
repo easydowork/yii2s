@@ -7,7 +7,7 @@ return [
             'class' => \Yii2S\Swoole\Db\CoroutineDbConnection::class,
             'dsn' => 'mysql:host=127.0.0.1;dbname=blog',
             'username' => 'root',
-            'password' => 'root',
+            'password' => getenv('YII2S_TEST_DB_PASSWORD') ?: 'root',
             'charset' => 'utf8mb4',
         ],
         // Defined here (not only in web.php): the console app needs it too,
@@ -16,6 +16,7 @@ return [
             'class' => \Yii2S\Swoole\Redis\CoroutineRedisConnection::class,
             'hostname' => '127.0.0.1',
             'port' => 6379,
+            'password' => getenv('YII2S_TEST_REDIS_PASSWORD') ?: null,
             'poolMaxActive' => 10,
         ],
         // Shared by the web app (pushing jobs) and the console app

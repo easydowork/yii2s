@@ -54,13 +54,14 @@ return [
             'class' => \Yii2S\Swoole\Db\CoroutineDbConnection::class,
             'dsn' => 'mysql:host=127.0.0.1;dbname=yii2s_test',
             'username' => 'root',
-            'password' => 'root',
+            'password' => getenv('YII2S_TEST_DB_PASSWORD') ?: 'root',
             'charset' => 'utf8mb4',
         ],
         'redis' => [
             'class' => \Yii2S\Swoole\Redis\CoroutineRedisConnection::class,
             'hostname' => '127.0.0.1',
             'port' => 6379,
+            'password' => getenv('YII2S_TEST_REDIS_PASSWORD') ?: null,
         ],
         'cache' => [
             'class' => \Yii2S\Swoole\Cache\CoroutineRedisCache::class,

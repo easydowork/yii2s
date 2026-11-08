@@ -29,6 +29,7 @@ return [
             'class' => \Yii2S\Swoole\Redis\CoroutineRedisConnection::class,
             'hostname' => '127.0.0.1',
             'port' => 6379,
+            'password' => getenv('YII2S_TEST_REDIS_PASSWORD') ?: null,
             'poolMaxActive' => 5,
         ],
         'swooleHttpServer' => [
