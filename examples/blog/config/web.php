@@ -5,6 +5,9 @@ $common = require __DIR__ . '/common.php';
 $config = [
     'id' => 'blog',
     'basePath' => dirname(__DIR__),
+    // swoole-cli has no php.ini (PHP defaults to UTC) and Yii2 pins the app
+    // timezone to UTC - declare it so log timestamps match system time.
+    'timeZone' => 'Asia/Shanghai',
     'bootstrap' => [
         // Standard Yii2 practice: instantiate the log dispatcher, otherwise
         // Yii::error() messages never reach the configured targets.

@@ -10,6 +10,10 @@
 return [
     'id' => 'yii2s-example',
     'basePath' => dirname(__DIR__),
+    // swoole-cli ships without a php.ini, so PHP defaults to UTC; Yii2 then
+    // pins the application timezone to UTC as well. Declare it explicitly so
+    // log timestamps (and everything time-based) match the system timezone.
+    'timeZone' => 'Asia/Shanghai',
     'controllerNamespace' => 'app\controllers',
     // The only required integration step: this bootstrap replaces the stock
     // Yii2 component classes (request/response/db/redis) with their coroutine
