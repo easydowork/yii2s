@@ -82,6 +82,11 @@ return [
                     'class' => \Yii2S\Swoole\Log\CoroutineFileTarget::class,
                     'logFile' => '@app/runtime/logs/app.log',
                     'maxBufferMessages' => 20,
+                    // A resident server must not write per-request info logs
+                    // (every DB query logs at info level) - a sustained load
+                    // would fill the disk in hours. Keep the file for errors
+                    // and warnings only.
+                    'levels' => [\yii\log\Logger::LEVEL_ERROR, \yii\log\Logger::LEVEL_WARNING],
                 ],
             ],
         ],
