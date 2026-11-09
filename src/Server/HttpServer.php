@@ -12,10 +12,15 @@ namespace Yii2S\Swoole\Server;
 
 use Swoole\Http\Server as SwooleHttpServer;
 use Swoole\Process;
+use Swoole\WebSocket\Server as SwooleWebSocketServer;
+use Throwable;
 use Yii;
 use yii\base\Component;
+use yii\base\Event;
 use yii\base\InvalidConfigException;
 use yii\di\Instance;
+use Yii2S\Swoole\Websocket\WebsocketBroadcasterInterface;
+use Yii2S\Swoole\Websocket\WebsocketHandlerInterface;
 
 /**
  * HTTP server built on the classic multi-process [[Swoole\Http\Server]].
@@ -30,6 +35,12 @@ use yii\di\Instance;
  * class used to wrap: every request is handled inside a coroutine, the
  * dispatcher rebuilds request-scoped state per request and pooled connections
  * stay sticky to their coroutine.
+ *
+ * With [[enableWebSocket]] the internal server is a
+ * [[Swoole\WebSocket\Server]] instead - a subclass of Http\Server, so plain
+ * HTTP keeps flowing through [[dispatcher]] on the same port while
+ * `Upgrade: websocket` requests are bridged to the user-provided
+ * [[websocketHandler]] (see [[Yii2S\Swoole\Websocket\WebsocketHandlerInterface]]).
  */
 class HttpServer extends Component
 {
@@ -38,6 +49,18 @@ class HttpServer extends Component
     public const EVENT_AFTER_START = 'afterStart';
 
     public const EVENT_AFTER_STOP = 'afterStop';
+
+    /** Manager-process callback when a worker crashed (segfault / fatal / OOM). */
+    public const EVENT_WORKER_ERROR = 'workerError';
+
+    /** Normal shutdown begins; coroutine APIs are still usable here. */
+    public const EVENT_BEFORE_SHUTDOWN = 'beforeShutdown';
+
+    /** Worker is draining (reload_async); keep event handles minimal to exit. */
+    public const EVENT_WORKER_EXIT = 'workerExit';
+
+    /** Worker stopped; no coroutine/event-loop APIs are usable here. */
+    public const EVENT_WORKER_STOP = 'workerStop';
 
     public string $host = '127.0.0.1';
 
@@ -129,6 +152,35 @@ class HttpServer extends Component
      *  workers): 92 qps with hooks vs 19 without. */
     public ?int $hookFlags = SWOOLE_HOOK_ALL;
 
+    /** @var bool whether to run the internal server as a
+     *  [[Swoole\WebSocket\Server]] (a subclass of Http\Server). Plain HTTP
+     *  keeps flowing through [[dispatcher]] on the same port; `Upgrade:
+     *  websocket` requests are bridged to [[websocketHandler]]. */
+    public bool $enableWebSocket = false;
+
+    /** @var object|null user-implemented WebSocket lifecycle handler
+     *  ([[WebsocketHandlerInterface]]). Required when [[enableWebSocket]] is
+     *  true. Accepts an instance, a config array or a component id. Every
+     *  strategy - handshake authentication, allowed upgrade paths, message
+     *  formats, per-worker connection registries - belongs to the
+     *  implementation; the server only bridges the Swoole events. */
+    public $websocketHandler = null;
+
+    /** @var object|null optional cross-worker broadcast entry point
+     *  ([[WebsocketBroadcasterInterface]]); `start()` is invoked from
+     *  `onWorkerStart` and the implementation runs its own transport
+     *  (e.g. a Redis pub/sub subscriber coroutine). Accepts an instance,
+     *  a config array or a component id. */
+    public $websocketBroadcaster = null;
+
+    /** @var string bearer token guarding the observability endpoints
+     *  (`/metrics`, `/__pool`). Empty (default) = the endpoints are public
+     *  (backwards compatible); non-empty = requests must carry
+     *  `Authorization: Bearer <token>` (`hash_equals` compared) or they are
+     *  answered with 401 and NO payload. Send the header from Prometheus via
+     *  `scrape_configs[].authorization`. */
+    public string $adminToken = '';
+
     private ?SwooleHttpServer $server = null;
 
     private bool $isRunning = false;
@@ -159,6 +211,24 @@ class HttpServer extends Component
         $this->pidFile = $this->resolveAlias($this->pidFile);
         $this->documentRoot = $this->resolveAlias($this->documentRoot);
         $this->logFile = $this->resolveAlias($this->logFile);
+
+        if ($this->enableWebSocket) {
+            if ($this->websocketHandler === null) {
+                throw new InvalidConfigException(
+                    'Property "websocketHandler" must be set when "enableWebSocket" is true.'
+                );
+            }
+            $this->websocketHandler = Instance::ensure(
+                $this->websocketHandler,
+                WebsocketHandlerInterface::class
+            );
+            if ($this->websocketBroadcaster !== null) {
+                $this->websocketBroadcaster = Instance::ensure(
+                    $this->websocketBroadcaster,
+                    WebsocketBroadcasterInterface::class
+                );
+            }
+        }
 
         // Swoole's native static handler is not used: static files are served
         // at the PHP level so cache headers and range support stay ours.
@@ -248,26 +318,138 @@ class HttpServer extends Component
         // Explicit SWOOLE_PROCESS: a master + worker_num workers. The default
         // on some builds is SWOOLE_BASE (single process), which neither scales
         // across cores nor supports graceful reload().
-        $server = new SwooleHttpServer($this->host, $this->port, SWOOLE_PROCESS);
+        // With enableWebSocket the internal server is a Swoole\WebSocket\Server
+        // - a subclass of Http\Server, so every setting, pool and lifecycle
+        // hook below keeps working unchanged; plain HTTP requests still flow
+        // through onRequest on the same port.
+        $server = $this->enableWebSocket
+            ? new SwooleWebSocketServer($this->host, $this->port, SWOOLE_PROCESS)
+            : new SwooleHttpServer($this->host, $this->port, SWOOLE_PROCESS);
         $this->server = $server;
         $this->applySettings($server);
 
         $dispatcher = $this->dispatcher;
         $prewarm = $this->prewarmConnections;
         $maintenanceInterval = $this->poolMaintenanceInterval;
+        $broadcaster = $this->websocketBroadcaster;
+        $wsHandler = $this->enableWebSocket ? $this->websocketHandler : null;
+        $metricsPath = $dispatcher instanceof RequestDispatcher ? $dispatcher->metricsPath : '/metrics';
+        $poolMetricsPath = $dispatcher instanceof RequestDispatcher ? $dispatcher->poolMetricsPath : '/__pool';
+        $adminToken = $this->adminToken;
 
         // Every request runs inside a coroutine (Swoole enables this by
         // default); the dispatcher therefore keeps working unchanged.
-        $server->on('request', static function ($request, $response) use ($dispatcher, $server): void {
+        $server->on('request', static function ($request, $response) use ($dispatcher, $server, $wsHandler, $adminToken, $metricsPath, $poolMetricsPath): void {
+            // Observability access control: `/metrics` and `/__pool` accept a
+            // bearer token via the new adminToken setting. An empty token
+            // leaves them public (backwards compatible); a configured token
+            // makes unauthenticated scrapes answer 401 with NO payload -
+            // hash_equals avoids timing side channels. Prometheus supports
+            // this natively via scrape_configs[].authorization.
+            $uri = (string) ($request->server['REQUEST_URI']
+                ?? $request->server['request_uri']
+                ?? '');
+
+            if ($adminToken !== ''
+                && ($uri === $metricsPath || $uri === $poolMetricsPath)
+            ) {
+                $auth = (string) ($request->header['authorization'] ?? '');
+                if (!hash_equals('Bearer ' . $adminToken, $auth)) {
+                    $response->status(401);
+                    $response->end();
+                    return;
+                }
+            }
+
+            // Swoole 6.2 semantics (verified): when an onRequest handler is
+            // registered, `Upgrade: websocket` requests are routed HERE - the
+            // automatic handshake never fires, onHandShake is never called
+            // and the connection would not be established. Perform the
+            // upgrade manually (101 + Sec-WebSocket-Accept) or reject with
+            // 403; after the manual upgrade onOpen/onMessage/push all work.
+            if ($wsHandler !== null
+                && strtolower((string) ($request->header['upgrade'] ?? '')) === 'websocket'
+            ) {
+                try {
+                    $accepted = $wsHandler->handshake($request);
+                } catch (Throwable $e) {
+                    trigger_error('websocket handshake handler failed: ' . $e->getMessage(), E_USER_WARNING);
+                    $accepted = false;
+                }
+
+                if ($accepted === false || !$response->isWritable()) {
+                    if ($response->isWritable()) {
+                        $response->status(403);
+                        $response->end();
+                    }
+                    return;
+                }
+
+                $accept = base64_encode(sha1(
+                    (string) ($request->header['sec-websocket-key'] ?? '') . '258EAFA5-E914-47DA-95CA-C5AB0DC85B11',
+                    true
+                ));
+                $response->header('Upgrade', 'websocket');
+                $response->header('Connection', 'Upgrade');
+                $response->header('Sec-WebSocket-Accept', $accept);
+                $response->status(101);
+                $response->end();
+
+                return;
+            }
+
             $dispatcher->dispatch($request, $response, $server);
         });
+
+        if ($this->enableWebSocket) {
+            // open/message/close run inside request coroutines
+            // (enable_coroutine), so implementations may use the coroutine
+            // pools freely. A handler exception must not take the worker down.
+            $server->on('open', static function ($serv, $request) use ($wsHandler): void {
+                try {
+                    $wsHandler->open($serv, $request, (int) $request->fd);
+                } catch (Throwable $e) {
+                    trigger_error('websocket open handler failed: ' . $e->getMessage(), E_USER_WARNING);
+                }
+            });
+            $server->on('message', static function ($serv, $frame) use ($wsHandler): void {
+                try {
+                    $wsHandler->message($serv, $frame, (int) $frame->fd);
+                } catch (Throwable $e) {
+                    trigger_error('websocket message handler failed: ' . $e->getMessage(), E_USER_WARNING);
+                }
+            });
+            $server->on('close', static function ($serv, $fd) use ($wsHandler): void {
+                try {
+                    $wsHandler->close($serv, (int) $fd);
+                } catch (Throwable $e) {
+                    trigger_error('websocket close handler failed: ' . $e->getMessage(), E_USER_WARNING);
+                }
+            });
+        }
 
         // Each worker owns its own application/pools, so warm them up per
         // worker, not in the master (channels cannot survive fork). The borrow
         // loop needs a coroutine; workerStart runs outside one. The warm-up is
         // best-effort and asynchronous: the worker serves requests immediately
         // and pays the connect latency only if the warm-up has not finished.
-        $server->on('workerStart', static function () use ($dispatcher, $prewarm, $maintenanceInterval): void {
+        $server->on('workerStart', static function () use ($dispatcher, $prewarm, $maintenanceInterval, $server, $broadcaster): void {
+            // Kernel-level counters for /metrics (connection_num, abort_count,
+            // ...). stats() reads the shared server state, so every worker sees
+            // the same global numbers - the metrics middleware therefore
+            // appends them once per scrape instead of aggregating. Only the
+            // first-party dispatcher carries the provider; custom
+            // implementations degrade gracefully without it.
+            if ($dispatcher instanceof RequestDispatcher) {
+                $dispatcher->serverStatsProvider = static fn (): array => $server->stats();
+            }
+
+            if ($broadcaster !== null) {
+                \Swoole\Coroutine::create(static function () use ($broadcaster, $server): void {
+                    $broadcaster->start($server);
+                });
+            }
+
             if ($prewarm > 0) {
                 \Swoole\Coroutine::create(static function () use ($dispatcher, $prewarm): void {
                     $dispatcher->prewarm($prewarm);
@@ -294,6 +476,42 @@ class HttpServer extends Component
                     }
                 );
             }
+        });
+
+        // Lifecycle bridges: a worker crash (segfault / fatal / OOM-kill) is
+        // currently invisible - the manager silently respawns it. Surface it
+        // as a structured entry in the Swoole log_file plus an event, so
+        // monitoring can pick it up.
+        $server->on('WorkerError', function ($serv, $workerId, $workerPid, $exitCode, $signal): void {
+            $reason = match (true) {
+                $signal === 11 => 'segment fault (likely a Swoole/extension bug)',
+                $signal === 9 => 'SIGKILL (manual kill or OOM)',
+                $exitCode === 255 => 'PHP fatal error',
+                default => 'abnormal exit',
+            };
+            trigger_error(
+                sprintf('worker crashed: worker_id=%d worker_pid=%d exit_code=%d signal=%d (%s)', $workerId, $workerPid, $exitCode, $signal, $reason),
+                E_USER_WARNING
+            );
+            $this->trigger(self::EVENT_WORKER_ERROR, new Event([
+                'data' => ['worker_id' => $workerId, 'worker_pid' => $workerPid, 'exit_code' => $exitCode, 'signal' => $signal],
+            ]));
+        });
+
+        // Normal shutdown: coroutine APIs are still usable here (handbook),
+        // so handlers may flush metrics / close pools gracefully.
+        $server->on('BeforeShutdown', function (): void {
+            $this->trigger(self::EVENT_BEFORE_SHUTDOWN, new Event(['data' => []]));
+        });
+
+        // Draining phase after reload_async: keep event handles minimal so
+        // the worker exits as soon as in-flight requests finish.
+        $server->on('WorkerExit', function ($serv, $workerId): void {
+            $this->trigger(self::EVENT_WORKER_EXIT, new Event(['data' => ['worker_id' => $workerId]]));
+        });
+
+        $server->on('WorkerStop', function ($serv, $workerId): void {
+            $this->trigger(self::EVENT_WORKER_STOP, new Event(['data' => ['worker_id' => $workerId]]));
         });
 
         if ($this->watch) {
@@ -420,6 +638,23 @@ class HttpServer extends Component
         ];
 
         $server->set($this->settings);
+
+        // Blind-spot defence: a settings key can be stored but never consumed
+        // by Swoole (hook_flags was ignored by 6.2.x until Runtime::set took
+        // over). Flag keys that did not survive into the applied settings so
+        // misconfigurations surface instead of failing silently.
+        $ignored = [];
+        foreach (array_keys($this->settings) as $settingsKey) {
+            if (!array_key_exists($settingsKey, $server->setting)) {
+                $ignored[] = $settingsKey;
+            }
+        }
+        if ($ignored !== []) {
+            trigger_error(
+                'settings keys not applied by Swoole (verify they are consumed): ' . implode(', ', $ignored),
+                E_USER_WARNING
+            );
+        }
     }
 
     /**

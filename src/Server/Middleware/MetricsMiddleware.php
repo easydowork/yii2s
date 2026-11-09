@@ -24,6 +24,10 @@ final class MetricsMiddleware extends AbstractMetricsMiddleware
 {
     /**
      * @param \Closure(): array<string, ConnectionPool> $poolCollector
+     * @param \Closure(): ?array<string, int>|null $serverStatsProvider optional
+     * kernel-level `Swoole\Server->stats()` provider (connection_num,
+     * abort_count, coroutine_num, ...). These are global counters shared by
+     * all workers, so they are appended once per scrape and never aggregated.
      */
     public function __construct(
         bool $enabled,
@@ -31,6 +35,7 @@ final class MetricsMiddleware extends AbstractMetricsMiddleware
         \Closure $poolCollector,
         private RequestMetrics $requestMetrics,
         private ?MetricsAggregator $aggregator = null,
+        private ?\Closure $serverStatsProvider = null,
     ) {
         parent::__construct($enabled, $path, $poolCollector, false);
     }
@@ -56,9 +61,66 @@ final class MetricsMiddleware extends AbstractMetricsMiddleware
                 $body = $this->requestMetrics->render($pools);
             }
 
+            $body .= $this->renderServerStats();
+
             $response->end($body);
         }
 
         return true;
+    }
+
+    /**
+     * Appends the kernel-level gauges/counters from `Swoole\Server->stats()`.
+     * They are not aggregated across workers on purpose: these numbers are
+     * already global (shared server state), so every scrape carries one
+     * consistent copy.
+     */
+    private function renderServerStats(): string
+    {
+        if ($this->serverStatsProvider === null) {
+            return '';
+        }
+
+        try {
+            $stats = ($this->serverStatsProvider)();
+        } catch (Throwable) {
+            // stats() can fail while the server is shutting down; a metrics
+            // scrape must never become the thing that breaks a request.
+            return '';
+        }
+
+        if ($stats === null) {
+            return '';
+        }
+
+        $gauges = [
+            'connection_num' => ['yii2s_server_connection_num', 'gauge'],
+            'abort_count' => ['yii2s_server_abort_count', 'counter'],
+            'accept_count' => ['yii2s_server_accept_count', 'counter'],
+            'close_count' => ['yii2s_server_close_count', 'counter'],
+            'request_count' => ['yii2s_server_request_count', 'counter'],
+            'response_count' => ['yii2s_server_response_count', 'counter'],
+            'coroutine_num' => ['yii2s_server_coroutine_num', 'gauge'],
+            'total_recv_bytes' => ['yii2s_server_total_recv_bytes', 'counter'],
+            'total_send_bytes' => ['yii2s_server_total_send_bytes', 'counter'],
+        ];
+
+        // Re-type into a generic map: the ide-helper declares stats() with a
+        // fixed shape (all keys always present), which would make the runtime
+        // guards below look like dead code to the analyser.
+        /** @var array<string, mixed> $values */
+        $values = $stats;
+
+        $lines = [];
+        foreach ($gauges as $statKey => [$metric, $type]) {
+            if (!isset($values[$statKey]) || !is_numeric($values[$statKey])) {
+                continue;
+            }
+            $lines[] = "# HELP {$metric} Swoole server {$statKey}.";
+            $lines[] = "# TYPE {$metric} {$type}";
+            $lines[] = "{$metric} " . (string) $values[$statKey];
+        }
+
+        return $lines === [] ? '' : implode("\n", $lines) . "\n";
     }
 }

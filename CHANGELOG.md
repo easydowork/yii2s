@@ -102,6 +102,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`adminToken` bearer gate for the observability endpoints**: `/metrics` and
+  `/__pool` accept `HttpServer::$adminToken` - empty (default) keeps them
+  public (backwards compatible); a configured token makes unauthenticated
+  scrapes answer 401 with no payload (`hash_equals`, Prometheus
+  `authorization` supported natively). Business routes are unaffected.
+- **Same-port WebSocket support (interface-first)**: `HttpServer::$enableWebSocket`
+  (default `false`) runs the internal server as `Swoole\WebSocket\Server` - plain
+  HTTP keeps working on the same port while upgrades are bridged to a
+  user-implemented `WebsocketHandlerInterface` (`handshake/open/message/close`).
+  Auth strategy, allowed paths, message formats, connection registries and
+  broadcast transports are entirely user-defined; an optional
+  `WebsocketBroadcasterInterface` (`start()` per worker) is the extension point
+  for cross-worker pushes (e.g. Redis pub/sub). Verified on 6.2.x semantics:
+  upgrades are served **inside onRequest** (manual 101 + Sec-WebSocket-Accept),
+  `onHandShake` is never called once an onRequest handler exists.
+- **Lifecycle events + kernel stats**: `HttpServer` now forwards
+  `onWorkerError / onBeforeShutdown / onWorkerExit / onWorkerStop` as Yii events
+  (`EVENT_WORKER_ERROR / EVENT_BEFORE_SHUTDOWN / EVENT_WORKER_EXIT /
+  EVENT_WORKER_STOP`) - worker crashes (segfault/fatal/OOM) surface in the
+  Swoole log with a structured entry. The `/metrics` endpoint appends
+  kernel-level gauges from `Swoole\Server->stats()` (connection_num,
+  abort_count, accept/close counts, coroutine_num, send/recv bytes).
 - **Coroutine runtime hooks enabled by default (behavior change)**: the
   async-style `Swoole\Http\Server` does not enable the runtime hook on its
   own, so PDO/mysqli/file IO **blocked the worker event loop** and the

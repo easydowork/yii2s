@@ -515,6 +515,55 @@ use Swoole\Coroutine;
 多核部署用**多端口 + upstream**：每个实例监听一个端口、各自独立的 pid 文件，由
 supervisor/systemd 托管。
 
+### 观测端点访问控制（`adminToken`）
+
+`/metrics` 与 `/__pool` 暴露流量画像、延迟分布、池配置与容量边界——**不要无防护地
+暴露在公网**。`HttpServer::$adminToken` 提供应用层的 bearer token 门禁：
+
+- `adminToken` 为空（默认）：观测端点**公开访问**（向后兼容）——公网部署请配置；
+- `adminToken` 非空：请求需携带 `Authorization: Bearer <token>`（`hash_equals` 比对），
+  缺失/错误一律 **401 且无响应体**（什么都不泄露）；业务路由不受影响。
+
+```php
+'swooleHttpServer' => [
+    'adminToken' => getenv('ADMIN_TOKEN'),
+],
+```
+
+```yaml
+# Prometheus 抓取配置（authorization 原生支持）：
+scrape_configs:
+  - job_name: yii2s
+    authorization:
+      type: Bearer
+      credentials: "<adminToken>"
+    static_configs:
+      - targets: ["10.0.0.5:9501"]
+```
+
+外网访问（`curl -H "Authorization: Bearer <token>" https://example.com/metrics`）需
+经 nginx 反代——nginx 侧也可叠加 IP 白名单做第二道防线（纵深防御）。
+
+### OPcache 与 reload
+
+服务器自带 OPcache（swoole-cli / 生产 php 均常见）。OPcache 的
+`opcache.validate_timestamps`（默认开）+ `revalidate_freq`（默认 2s）意味着：
+**代码文件更新后 2 秒内的 reload 仍可能加载旧 opcode**。要求零窗口时二选一：
+
+1. `opcache.validate_timestamps=0` + `swoole/reload` 前手动 `opcache_reset()`；
+2. 或接受 ≤`revalidate_freq` 的延迟（把 reload 排进发布流程的 sleep）。
+
+`watch` 热更新同理：文件变化触发 reload，但新代码生效受上述窗口约束。
+
+### 运行时诊断 API（Swoole 内核，worker 协程内可用）
+
+| API | 用途 |
+|---|---|
+| `Swoole\Server->stats()` | 连接数/协程数/请求与响应计数（`/metrics` 已暴露） |
+| `Swoole\Server->getClientInfo($fd)` | 单连接信息（remote_ip、连接时长等；dispatch_mode=1/3 下断开后即删） |
+| `Swoole\Server->getWorkerStatus($workerId)` | worker 忙闲（`SWOOLE_WORKER_BUSY/IDLE/EXIT`） |
+| `Swoole\Server->heartbeat($ifClose)` | 主动心跳探测：返回或关闭超过约定时间的 fd |
+
 ```nginx
 upstream yii2s {
     server 127.0.0.1:9501;

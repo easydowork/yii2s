@@ -84,6 +84,15 @@ class RequestDispatcher implements RequestDispatcherInterface
     public bool $enableMetricsAggregation = false;
 
     /**
+     * @var \Closure|null optional kernel-level server statistics provider,
+     * wired by [[HttpServer]] from `onWorkerStart` (returns the
+     * `Swoole\Server->stats()` map: connection_num, abort_count,
+     * coroutine_num, ...). When set, the Prometheus endpoint appends these
+     * kernel gauges/counters to its output.
+     */
+    public ?\Closure $serverStatsProvider = null;
+
+    /**
      * @var string application component id of the Redis connection used for
      * metrics aggregation (see [[enableMetricsAggregation]])
      */
@@ -198,7 +207,10 @@ class RequestDispatcher implements RequestDispatcherInterface
                     $this->metricsPath,
                     fn (): array => PoolMetricsCollector::collect($this->getApplication()),
                     $this->requestMetrics,
-                    $this->enableMetricsAggregation ? $this->getMetricsAggregator() : null
+                    $this->enableMetricsAggregation ? $this->getMetricsAggregator() : null,
+                    $this->serverStatsProvider !== null
+                        ? fn (): ?array => ($this->serverStatsProvider)()
+                        : null,
                 ),
             ];
         }

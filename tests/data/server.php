@@ -68,16 +68,23 @@ foreach (is_array($options['rawRoutes'] ?? null) ? $options['rawRoutes'] : [] as
 
 $serverOptions = is_array($options['server'] ?? null) ? $options['server'] : [];
 
-$config['components']['swooleHttpServer'] = array_merge([
-    'class' => \Yii2S\Swoole\Server\HttpServer::class,
-    'host' => '127.0.0.1',
-    'port' => $port,
-    'workerNum' => 1,
-    'dispatcher' => $dispatcher,
-], $serverOptions, [
-    'port' => $port,
-    'dispatcher' => $dispatcher,
-]);
+// The config file's own swooleHttpServer block is the base, so per-config
+// options (enableWebSocket, websocketHandler, ...) reach the component.
+$config['components']['swooleHttpServer'] = array_merge(
+    is_array($config['components']['swooleHttpServer'] ?? null)
+        ? $config['components']['swooleHttpServer']
+        : [],
+    [
+        'class' => \Yii2S\Swoole\Server\HttpServer::class,
+        'host' => '127.0.0.1',
+        'workerNum' => 1,
+    ],
+    $serverOptions,
+    [
+        'port' => $port,
+        'dispatcher' => $dispatcher,
+    ]
+);
 
 $server = Yii::createObject($config['components']['swooleHttpServer']);
 $server->start();

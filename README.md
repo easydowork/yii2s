@@ -270,6 +270,47 @@ php yii swoole/start        # 就这么跑起来了
 ],
 // 同时：ulimit -n（nofile）要调大——Swoole 的 max_conn 默认跟随它。
 
+### WebSocket（同端口，默认关闭）
+
+`enableWebSocket=true` 时服务器以 `Swoole\WebSocket\Server` 运行：**同一端口
+HTTP 照常工作**，`Upgrade: websocket` 请求桥接到你实现的
+`Yii2S\Swoole\Websocket\WebsocketHandlerInterface`——鉴权（session/token/JWT）、
+允许的路径、消息格式、连接表**全部由你定义**，服务器只桥接事件：
+
+```php
+'swooleHttpServer' => [
+    'enableWebSocket' => true,
+    'websocketHandler' => new App\Websocket\ChatHandler(),      // 实现接口
+    'websocketBroadcaster' => new App\Websocket\RedisBroadcaster(), // 可选：跨 worker 广播
+],
+```
+
+```php
+final class ChatHandler implements \Yii2S\Swoole\Websocket\WebsocketHandlerInterface
+{
+    public function handshake(\Swoole\Http\Request $request): bool
+    {
+        return str_starts_with($request->server['request_uri'] ?? '', '/ws'); // 路径白名单自定
+    }
+
+    public function open(\Swoole\WebSocket\Server $server, \Swoole\Http\Request $request, int $fd): void
+    {
+        // 鉴权点（握手阶段无法拒绝——Swoole 语义）：失败时
+        // $server->disconnect($fd, 4001, 'unauthorized')
+    }
+
+    public function message(\Swoole\WebSocket\Server $server, \Swoole\WebSocket\Frame $frame, int $fd): void
+    {
+        $server->push($fd, 'echo:' . $frame->data); // 协程内：池/DB/Redis 直接可用
+    }
+
+    public function close(\Swoole\WebSocket\Server $server, int $fd): void {}
+}
+```
+
+协议细节：客户端 ping 帧自动回 pong；踢人用 `$server->disconnect($fd, 4000, ...)`；
+跨 worker 广播自己实现 transport（文档模式：Redis pub/sub，每个 worker 订阅协程）。
+
 ```php
 'cache' => [
     'class' => \Yii2S\Swoole\Cache\CoroutineRedisCache::class,

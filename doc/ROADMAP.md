@@ -352,7 +352,174 @@ ZTS 多线程模式相关（`single_thread`/`bootstrap`/`init_arguments`，我�
 
 ---
 
-## 7. 执行约定
+## 7. Swoole API 层扩展点审计（2026-11-09，§6 后续）
+
+> 背景：`setting.md` 的 102 项配置审计（§6）之后，补读 `server/` 目录其余
+> API 文档（properties / events / methods / port / init / co_init / event_class /
+> task / pipemessage / statusinfo / packet / server_port，共 3585 行），从
+> **API 层**而非 settings 层审计「可调优点」与「设计上未预留的扩展点」。
+
+### 7.1 项目已用对的部分（通读确认）
+
+- **架构选型**：`co_init.md` 明确协程风格 `Coroutine\Server` 不自动多进程、
+  reload 需自己做——印证「异步风格 + `SWOOLE_PROCESS`」选型正确
+- **reload 加载新代码的机制**：手册要求应用必须在 `WorkerStart` 回调内加载——
+  项目的 Yii app 初始化在回调内，`swoole/reload` 加载新代码成立
+- **SIGUSR1/SIGUSR2 与 reload 防重入保护**——`swoole/reload` 命令实现正确
+- Process 模式下连接在 master 维持、worker 重启/异常退出不断连（e2e 演练观察一致）
+
+### 7.2 可调优 / 可新增的扩展点（按价值排序）
+
+| # | 扩展点 | 价值 | 成本 | 说明 |
+|---|---|---|---|---|
+| 1 | 🔴 **`onWorkerError`** | 高 | 低 | worker 崩溃（signal=11 段错误 / exit_code=255 Fatal / signal=9 OOM·kill）在 manager 进程回调，官方定位即报警监控。项目目前 worker 异常完全静默（manager 自动拉起，仅 stdout）——结构化记入 Yii 日志 + `/metrics` 计数后，worker 崩溃成为可观测事件 |
+| 2 | 🔴 **`stats()` 内核级指标并入 `/metrics`** | 高 | 低 | `connection_num / abort_count(被拒连接) / accept_count / close_count / coroutine_num / idle_worker_num / request_count / response_count / total_send_bytes` 为内核级真实计数（abort_count 当前缺失）——一次 `$server->stats()` 调用全部到手 |
+| 3 | ✅ **观测端点访问控制**——已实施 `adminToken`（**用户决策：不做管理端口分离，观测端点留在业务端口、外网可达**）：token 为空=公开（向后兼容）；非空=观测端点需 `Authorization: Bearer`（`hash_equals`），缺失/错误一律 **401 且无响应体**，业务路由不受影响 | 中 | 中 | 手册：附加端口默认继承主端口 HTTP 协议并走主 onRequest；管理端口形态经用户评审后移除（外网直连 + token 的形态更符合实际使用） |
+| 4 | ✅ **`onWorkerExit`（排空钩子）**——已桥接 `EVENT_WORKER_EXIT`；池强制关闭评估后**不做**（排空期在途协程仍持连接，强关有失败风险；worker 退出自动清理连接） | 中 | 中 | `reload_async` 开启时 worker 排空期间持续触发，官方推荐「移除/关闭异步 Socket，句柄清零即退出」 |
+| 5 | ✅ **`onBeforeShutdown`**（v4.8.0+，可用协程）——已桥接 `EVENT_BEFORE_SHUTDOWN`；metrics flush 评估后无需额外实现（聚合数据留存 Redis，进程退出不销毁） | 中 | 低 | 正常停机前钩子：metrics 最终 flush、池优雅关闭的官方入口 |
+| 6 | ✅ **reload × OPcache 语义**——已文档化（DEVELOPMENT 4.2）：swoole-cli/生产自带 OPcache，`validate_timestamps` 默认 2s 窗口，零窗口二选一（关闭校验+手动 reset / 接受 ≤freq 延迟） | 中 | 低 | 手册：开 OPcache 时 reload 可能加载旧 opcode。watch 热更新与 P1 升级演练都会踩 |
+| 7 | 🟢 **`addProcess` 用户进程** | 低-中 | 中 | manager 托管的独立常驻进程（不受 reload 影响、崩溃自动拉起）——适合旁路任务（独立上报、日志压缩）。**keeper 不能搬**（池 per-worker，maintain 必须在 worker 内）；当前 Redis 聚合已够用 |
+| 8 | 🟢 **`onPipeMessage` + `sendMessage`** | 低 | 低 | master/manager/worker 间 IPC——多实例协调、热更新广播时才需要；watch 轮询当前够用 |
+| 9 | ✅ **`heartbeat()` / `getClientInfo` / `getWorkerStatus`**——已文档化（DEVELOPMENT 4.2「运行时诊断 API」表） | 低 | 低 | 主动心跳（返回/关闭超时 fd）、连接级信息、worker 忙闲（BUSY/IDLE/EXIT） |
+
+### 7.3 设计上未预留好的扩展点（诚实评估）
+
+1. ✅ **生命周期事件全是黑盒**——已解决：`HttpServer` 桥接
+   `onWorkerError / onBeforeShutdown / onWorkerExit / onWorkerStop` 四个
+   Yii 事件（`EVENT_WORKER_ERROR` 等），用户可挂报警/清理回调。
+2. ✅ **管理端口未预留**——以 **token 门禁**方式解决（用户决策：观测端点留在
+   业务端口、外网可达，`adminToken` 非空即强制 Bearer 认证）；管理端口分离
+   形态经评审移除（见 §7.2 #3）。
+3. 🟡 **settings 透传的「静默失效」盲区**——部分解决：`applySettings` 末尾
+   增加**存在性校验**（键未进入 `$server->setting` 即 warning）。已知局限：
+   「被存储但不被消费」的键（如 6.2.x 早期 hook_flags）无法检出——`hook_flags`
+   已改走 `Coroutine::set()` 通道，其余键靠文档与手册核对。
+4. ✅ **OPcache × reload 语义未处理**——已文档化（DEVELOPMENT 4.2）：确认
+   swoole-cli/生产自带 OPcache，2s 窗口与零窗口方案均已写入。
+
+### 7.4 实施清单
+
+**本轮立即实施（低成本高价值）——✅ 2026-11-09 完成**：
+
+- [x] `onWorkerError` → 结构化日志（exit_code/signal 归因：segfault/fatal/OOM）+
+      `EVENT_WORKER_ERROR` Yii 事件（manager 进程回调，用户 handler 可接报警）
+- [x] `stats()` 关键指标并入 `/metrics`：MetricsMiddleware 新增
+      `$serverStatsProvider`（HttpServer 从 onWorkerStart 注入
+      `Swoole\Server->stats()`），输出 connection_num / abort_count /
+      accept_count / close_count / request_count / response_count /
+      coroutine_num / send/recv bytes（**不参与跨 worker 聚合——内核计数全局一致**）
+- [x] 生命周期事件面：`EVENT_WORKER_ERROR / EVENT_BEFORE_SHUTDOWN /
+      EVENT_WORKER_EXIT / EVENT_WORKER_STOP` 四个 Yii 事件桥接
+      （生命周期黑盒消除；运行时实测桥接两次工作——ws 测试的 worker fatal 被正确记录）
+
+**待办结论（全部落档，2026-11-09）**：
+
+- [x] ~~管理端口分离~~ ✅ **设计变更（用户决策）**：不做管理端口，观测端点留在
+      业务端口，`adminToken` bearer 门禁（空=公开向后兼容；非空=401 无泄露，
+      外网带 token 直连），测试钉死全部边界
+- [x] ~~`onWorkerExit` 排空加速、`onBeforeShutdown` flush~~ 事件已桥接；池强制关闭
+      与 metrics flush 评估后**不做**（排空期在途协程持连接，强关有失败风险；
+      聚合数据留存 Redis 不随进程销毁），结论见 §7.2 #4/#5
+- [x] ~~OPcache × reload~~ 已文档化（DEVELOPMENT 4.2：swoole-cli/生产自带
+      OPcache 已确认，2s 窗口与零窗口方案写入）
+- [x] ~~`start()` 后 settings 消费差异校验~~ 已实施（存在性校验 + 局限标注，§7.3 #3）
+- [x] ~~`heartbeat()` / `getWorkerStatus` 文档化~~ 已写入 DEVELOPMENT 4.2「运行时诊断 API」
+
+---
+
+### 7.5 WebSocket 同端口支持（接口化设计，✅ 2026-11-09 实施完成）
+
+**决策（已拍板）**：
+
+- `enableWebSocket` 默认 **off**——现有用户零影响，显式开启
+- **项目只留接口、不内置策略**：握手鉴权、消息格式、路由白名单、连接注册表、
+  广播实现全部由用户按自己的方式实现；项目提供生命周期骨架与协程环境
+
+**手册依据**（websocket_server.md）：
+
+- `Swoole\WebSocket\Server` **继承自** `Swoole\Http\Server`——全部 API/配置项/
+  settings 默认值（hook/池/日志/生命周期）原封不动继承
+- 「设置了 onRequest 回调，WebSocket\Server 也可以同时作为 HTTP 服务器」——
+  **同端口 HTTP + WS 共存是官方原生形态**（协议升级：普通 HTTP 走 onRequest，
+  `Upgrade: websocket` 走握手）
+- 额外 4 回调：`onMessage`（必选）、`onOpen`、`onHandShake`（可选；自定义握手
+  须 `status(101)+end()` 才算成功，非 101 即拒绝）、`onBeforeHandshakeResponse`（Swoole 5+）
+- 协议层：客户端 ping 帧**自动回 pong**（不触发 onMessage）；
+  `disconnect(fd, code, reason)` 服务端踢人（1000 或 4000-4999）；
+  `open_websocket_close_frame` 接收关闭帧；push 支持 COMPRESS（v4.4.12+）；
+  `onDisconnect`（含 HTTP close 场景）
+
+**接口设计（草案）**：
+
+```php
+interface WebsocketHandlerInterface
+{
+    /** 握手：true|array 接受升级（array 作为该连接的元数据，由实现方自存）；
+     *  false 或抛异常即拒绝升级（拒绝响应的状态码/内容由实现方决定，例如 401）。
+     *  鉴权策略完全由实现方决定：session / token / JWT / 无——不内置。 */
+    public function handshake(Swoole\Http\Request $request): bool|array;
+
+    public function open(Swoole\WebSocket\Server $server, Swoole\Http\Request $request, int $fd): void;
+
+    /** 消息原样透传（Frame->data 不做任何格式约定；JSON/二进制由实现方自定）。 */
+    public function message(Swoole\WebSocket\Server $server, Swoole\WebSocket\Frame $frame, int $fd): void;
+
+    public function close(Swoole\WebSocket\Server $server, int $fd): void;
+}
+
+interface WebsocketBroadcasterInterface   // 可选：跨 worker / 跨实例广播
+{
+    /** WorkerStart 后调用：实现方在此起订阅协程（如 Redis pub/sub），
+     *  收到消息自行 push 到本 worker 的目标连接。 */
+    public function start(Swoole\WebSocket\Server $server): void;
+}
+```
+
+**Server 层改动（HttpServer）**：
+
+- 新属性：`enableWebSocket=false`、`websocketHandler`（必填 when enabled）、
+  `websocketBroadcaster`（可选）
+- enabled 时内部实例 `new Swoole\WebSocket\Server(...)`（继承 Http，其余
+  settings/生命周期/hook 不变）；`onRequest` 保留（HTTP 共存）
+- 回调桥接：`handshake` → handler（含拒绝路径）/ `open/message/close` → handler；
+  `broadcaster->start()` 在 WorkerStart 触发
+
+**明确不做（用户侧实现，文档给模式示例）**：
+
+鉴权策略（session/token/JWT/无）｜握手路径白名单（handler 读 request_uri 自判）｜
+消息格式与 type 路由｜连接注册表（per-worker 元数据由 handler 自存）｜
+跨 worker 广播实现（文档给 Redis pub/sub 模式示例）｜应用层心跳
+（协议层 ping/pong Swoole 自动；空转清理用 `heartbeat_check_time`，B 类清单已有）
+
+**协程环境**：handler 的 open/message/close 运行在请求协程内，可直接使用协程池
+（DB/Redis 查询）——hook ALL（§6.2）保证 PDO 协程化；池隔离保证每协程独立连接。
+
+**测试计划**：
+
+- 接口集成测试：项目自带 TestHandler 夹具（accept `/ws`、echo 消息、服务端
+  disconnect）+ `Coroutine\Http\Client` upgrade 模式：握手 101、消息往返、
+  服务端踢人、**HTTP 共存断言（同端口 HTTP 200）**
+- e2e/smoke 扩展 ws 检查组
+
+**实施结果（✅ 2026-11-09，与规划有一处重要修正）**：
+
+- [x] 接口落地：`WebsocketHandlerInterface`（handshake/open/message/close）+
+      `WebsocketBroadcasterInterface`（可选 start）——接口化设计保持
+- [x] 实现发现并修正：Swoole 6.2.x 下 **onRequest 与 onHandShake 互斥**——
+      注册 onRequest 后升级请求走 onRequest、`onHandShake` 被忽略且连接不建立
+      （自动握手也不触发 onOpen）。修正为 **onRequest 内手动升级**
+      （101 + Sec-WebSocket-Accept），实测 onOpen/onMessage/push/
+      isEstablished 全部工作；握手拒绝（403）在 onRequest 阶段完成。
+      `open()` 的 docblock 明确其为鉴权点（失败即 disconnect 4xxx）
+- [x] 集成测试 4 用例全绿：HTTP 共存、echo、元数据（open 登记）、
+      服务端 disconnect（客户端协议层自动回 close 后 recv=false）
+- [x] 回归：phpunit 224/890 ✅、e2e 9/9 ✅、smoke 51/52（唯一失败为 mac
+      平台限制，非回归）
+- [ ] Redis pub/sub 广播模式文档示例（接口已就绪）
+
+---
+
+## 8. 执行约定
 
 1. **一任务一提交**：每个 ☑ 项独立提交，提交信息与改动一致（避免 `e74bbb3` 那类「信息与文件脱节」）。
 2. **验证门槛**：全量 `phpunit` + `phpstan` + `php-cs-fixer` 通过，涉及池/运行时改动追加 soak 基线对比。
@@ -361,7 +528,7 @@ ZTS 多线程模式相关（`single_thread`/`bootstrap`/`init_arguments`，我�
 
 ---
 
-## 8. 诚实边界
+## 9. 诚实边界
 
 - 本计划**压低**「低级泄漏、上线即翻车」的风险，**不保证**零 bug。
 - 常驻进程的坑是慢变量，`time_in_production` 无法被任何方案压缩。
