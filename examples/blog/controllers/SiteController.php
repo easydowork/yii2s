@@ -7,6 +7,7 @@ use app\models\Comment;
 use app\models\Post;
 use app\models\RegisterForm;
 use Yii;
+use Yii2S\Swoole\Resilience\RateLimiter;
 use yii\data\Pagination;
 use yii\web\Controller;
 use yii\web\ErrorAction;
@@ -20,6 +21,18 @@ class SiteController extends Controller
     {
         return [
             'error' => ['class' => ErrorAction::class],
+        ];
+    }
+
+    public function behaviors(): array
+    {
+        return [
+            'rateLimiter' => [
+                'class' => RateLimiter::class,
+                'only' => ['api'],
+                'limit' => 10,
+                'window' => 10,
+            ],
         ];
     }
 
@@ -123,32 +136,11 @@ class SiteController extends Controller
     }
 
     /**
-     * Security demo: RateLimiter in front of an API-ish endpoint.
-     * 10 requests per 10s per client IP; over the limit answers 429.
-     */
-    /**
-     * Security demo: IP-based rate limiting (10 req / 10s per client IP) via
-     * the yii2s Resilience\RateLimiter (Redis fixed window, coroutine pool).
-     *
-     * The stock `yii\filters\RateLimiter` calls `getIdentity(false)`, which
-     * does not open the session itself. The dispatcher restores the identity
-     * before filters run when the request already has a session id, so that
-     * filter sees the logged-in user. This endpoint stays IP-keyed because
-     * it is anonymous: the stock filter skips guests.
+     * Security demo. `behaviors()` attaches an IP rate limit: 10 requests
+     * per 10 seconds. Over the limit the filter answers 429. No login.
      */
     public function actionApi(): void
     {
-        $limiter = new \Yii2S\Swoole\Resilience\RateLimiter(
-            Yii::$app->get('redis')
-        );
-        $key = 'api:' . Yii::$app->request->getUserIP();
-
-        if (!$limiter->allow($key, 10, 10)) {
-            Yii::$app->response->statusCode = 429;
-            Yii::$app->response->content = 'rate limited';
-            return;
-        }
-
         Yii::$app->response->content = 'ok';
     }
 

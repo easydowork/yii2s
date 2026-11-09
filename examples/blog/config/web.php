@@ -44,14 +44,6 @@ $config = [
             // X-Forwarded-For entry instead of the proxy address.
             'trustedProxies' => ['127.0.0.1', '::1'],
         ],
-        // NOTE: the RateLimiter for the demo endpoint (site/api) is built
-        // inside SiteController::actionApi() via Yii::$app->get('redis') -
-        // NOT as a component here. Reasons (learned the hard way):
-        // 1) `Instance::of('redis')` in a component definition resolves
-        //    through the GLOBAL Yii::$container, which has no 'redis' entry
-        //    and case-insensitively instantiates the native \Redis class;
-        // 2) a closure definition is invoked by the DI container whose
-        //    parameters resolve by name against the container, not $app.
         // Standard Yii2 wiring: route exceptions through site/error so the
         // custom error view (views/site/error.php) is rendered.
         'errorHandler' => [

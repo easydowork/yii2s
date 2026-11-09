@@ -46,6 +46,17 @@ class CoroutineApplication extends Application
      */
     public const REQUEST_SCOPED_COMPONENTS = ['request', 'response', 'session', 'user', 'view', 'errorHandler'];
 
+    /**
+     * @param array<string, mixed> $config
+     */
+    public function __construct($config = [])
+    {
+        // Yii.php replaces Yii::$classMap. Swap in the coroutine classes
+        // before a view or anything else loads the stock ones.
+        ClassMap::install();
+        parent::__construct($config);
+    }
+
     private const CONTEXT_KEY_PREFIX = 'yii2s.app.component.';
 
     /**

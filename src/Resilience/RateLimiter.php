@@ -10,37 +10,66 @@ declare(strict_types=1);
 
 namespace Yii2S\Swoole\Resilience;
 
+use Yii;
 use Yii2S\Swoole\Redis\CoroutineRedisConnection;
+use yii\base\ActionFilter;
+use yii\base\InvalidConfigException;
+use yii\web\TooManyRequestsHttpException;
 
 /**
- * Fixed-window rate limiter backed by Redis (`INCR` + `EXPIRE`).
+ * IP rate limit as a controller filter.
  *
- * One atomic increment per request; the window is established on the first
- * hit. Suitable for guarding login endpoints, public APIs and other spots that
- * must bound the request rate per key (IP / user / route).
+ * Attach it in `behaviors()`. Each request increments a Redis fixed window
+ * keyed by the client IP. Guests are limited the same way as logged-in users.
+ * Over the limit the filter throws [[TooManyRequestsHttpException]] (HTTP 429).
+ *
+ * [[allow()]] is the same window, for a key you choose yourself.
  */
-class RateLimiter
+class RateLimiter extends ActionFilter
 {
     /**
-     * Public by Yii-ecosystem convention: the DI container passes the config
-     * key to the constructor AND runs configure() afterwards, so the property
-     * must be writable from outside (private/promoted private would throw
-     * "Cannot access private property" during configure).
+     * Redis connection, or the id of an application component that is one.
+     * Resolved on the first check so attaching the filter does not open a
+     * connection.
      */
-    public CoroutineRedisConnection $redis;
+    public CoroutineRedisConnection|string $redis = 'redis';
 
-    public string $prefix;
+    public string $prefix = 'yii2s:ratelimit:';
 
-    public function __construct(CoroutineRedisConnection $redis, string $prefix = 'yii2s:ratelimit:')
+    public int $limit = 60;
+
+    public int $window = 60;
+
+    /**
+     * Split the window per action. Off by default: one IP shares one window
+     * across the actions this filter applies to (`only` / `except`).
+     */
+    public bool $perAction = false;
+
+    public string $errorMessage = 'Rate limit exceeded.';
+
+    public bool $enableRateLimitHeaders = true;
+
+    public function beforeAction($action)
     {
-        $this->redis = $redis;
-        $this->prefix = $prefix;
+        $request = Yii::$app->getRequest();
+        $ip = (string) ($request->getUserIP() ?: 'unknown');
+        $key = $this->perAction ? $ip . ':' . $action->getUniqueId() : $ip;
+
+        if (!$this->allow($key, $this->limit, $this->window)) {
+            $this->addHeaders(0);
+            throw new TooManyRequestsHttpException($this->errorMessage);
+        }
+
+        $this->addHeaders($this->remaining($key, $this->limit));
+
+        return true;
     }
 
     /**
-     * Whether the request identified by `$key` is allowed within the window.
+     * Whether `$key` is still inside the window.
      *
-     * @param string $key the rate-limit bucket (e.g. an IP or user id)
+     * @param string $key bucket, for example an IP or a user id
      * @param int $limit maximum requests per window
      * @param int $windowSeconds window length in seconds
      */
@@ -51,22 +80,48 @@ class RateLimiter
         }
 
         $redisKey = $this->prefix . $key;
-        $count = (int) $this->redis->executeCommand('INCR', [$redisKey]);
+        $count = (int) $this->connection()->executeCommand('INCR', [$redisKey]);
 
         if ($count === 1) {
-            $this->redis->executeCommand('EXPIRE', [$redisKey, $windowSeconds]);
+            $this->connection()->executeCommand('EXPIRE', [$redisKey, $windowSeconds]);
         }
 
         return $count <= $limit;
     }
 
     /**
-     * Remaining requests available in the current window (0 when exhausted).
+     * Remaining requests in the current window (0 when exhausted).
      */
     public function remaining(string $key, int $limit): int
     {
-        $count = (int) $this->redis->executeCommand('GET', [$this->prefix . $key]);
+        $count = (int) $this->connection()->executeCommand('GET', [$this->prefix . $key]);
 
         return max(0, $limit - $count);
+    }
+
+    private function addHeaders(int $remaining): void
+    {
+        if (!$this->enableRateLimitHeaders) {
+            return;
+        }
+
+        Yii::$app->getResponse()->getHeaders()
+            ->set('X-Rate-Limit-Limit', (string) $this->limit)
+            ->set('X-Rate-Limit-Remaining', (string) $remaining)
+            ->set('X-Rate-Limit-Reset', (string) $this->window);
+    }
+
+    private function connection(): CoroutineRedisConnection
+    {
+        if ($this->redis instanceof CoroutineRedisConnection) {
+            return $this->redis;
+        }
+
+        $component = Yii::$app->get($this->redis);
+        if (!$component instanceof CoroutineRedisConnection) {
+            throw new InvalidConfigException('RateLimiter::$redis must be a CoroutineRedisConnection.');
+        }
+
+        return $this->redis = $component;
     }
 }

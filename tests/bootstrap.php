@@ -19,6 +19,8 @@ if (is_file($composerAutoload)) {
 }
 require_once __DIR__ . '/../vendor/yiisoft/yii2/Yii.php';
 
+Yii2S\Swoole\Runtime\ClassMap::install();
+
 Yii::setAlias('@yii2stest', __DIR__);
 Yii::setAlias('@yii2s/swoole', dirname(__DIR__));
 

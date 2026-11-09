@@ -430,7 +430,7 @@ swoole-cli scripts/soak.php --path=/demo/db --duration=60 --pid=<server pid>   #
 | 组件 | 作用 | 配置 |
 |---|---|---|
 | `CircuitBreaker` | 依赖故障时快速失败，避免 500 连击 | DB/Redis 的 `enableCircuitBreaker` 等 |
-| `RateLimiter` | Redis 固定窗口限流 | `new RateLimiter($redis)->allow($key, $limit, $window)` |
+| `RateLimiter` | 控制器过滤器，默认按客户端 IP 做 Redis 固定窗口限流 | `behaviors()` 里挂 `RateLimiter`，`limit` / `window` |
 | `Retry` | 指数退避重试 + 可重试异常白名单 | `(new Retry())->call($fn, $attempts, [Timeout::class])` |
 | 连接池健康 | min-idle 水位 / max-lifetime 回收 / 空闲保活 | `poolMinIdle`/`poolMaxLifetime`/`poolIdleTimeout` |
 | DB 断线自愈 | 连接丢失自动 discard，下个请求重建 | 内置于 `CoroutineCommand` |
@@ -442,10 +442,18 @@ use Yii2S\Swoole\Resilience\CircuitBreaker;
 $breaker = new CircuitBreaker(5, 30);           // 5 次失败打开，30s 冷却
 $result  = $breaker->call(fn () => $api->fetch(), fn () => $fallback);
 
-// 限流
-use Yii2S\Swoole\Resilience\RateLimiter;
-if (!(new RateLimiter(Yii::$app->redis))->allow($ip, 100, 60)) {
-    throw new \yii\web\TooManyRequestsHttpException();
+// 限流：挂到控制器上，按客户端 IP 计数，不要求登录。超出抛 429。
+// allow($key, $limit, $window) 仍可按自己的 key 调用。
+public function behaviors(): array
+{
+    return [
+        'rateLimiter' => [
+            'class' => \Yii2S\Swoole\Resilience\RateLimiter::class,
+            'only' => ['api'],
+            'limit' => 10,
+            'window' => 10,
+        ],
+    ];
 }
 
 // 重试

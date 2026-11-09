@@ -71,6 +71,7 @@ pid 文件读写与进程存活判断。
 | `CoroutineUrlManager` | 路由解析缓存（键是 method + host + pathInfo） |
 | `RequestStateManager` | 每请求重建请求作用域组件 + 归还池连接 + sweep + 日志 flush |
 | `SwooleResponseSender` | 把 Yii response 写到 Swoole response |
+| `ClassMap` | 在 `Yii.php` 之后改写 `Yii::$classMap`。当前替换 `yii\base\Widget`，以后的覆盖类加在这里 |
 
 ---
 
@@ -135,7 +136,7 @@ Redis 队列（`push` / `reserve` / `ack` / 失败重试 / 死信）。`reserve(
 |---|---|
 | `CircuitBreaker` | 熔断器（`call($op, $fallback?, $countsAsFailure?)`） |
 | `CircuitOpenException` | 熔断打开时抛出的类型化异常 |
-| `RateLimiter` | Redis 固定窗口限流（`allow($key, $limit, $window)`） |
+| `RateLimiter` | 控制器过滤器。默认按客户端 IP 做 Redis 固定窗口限流；`allow($key, $limit, $window)` 可按自定义 key 调用 |
 | `Retry` | 指数退避重试（`call($op, $attempts, $retryable, $baseDelay, $maxDelay)`） |
 
 ---

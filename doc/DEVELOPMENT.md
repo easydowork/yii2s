@@ -759,6 +759,7 @@ swoole-cli vendor/bin/php-cs-fixer check --diff
 | raw 路由 | 精确 `METHOD + path` 匹配、string→text/plain、array→JSON、query 不参与、方法不匹配回落 Yii、异常 500 | `RawRouteTest` |
 | 常驻服务 | DB 事务回滚、Cache、Redis、子协程连接池、日志落盘 | `testResidentServices` |
 | 并发隔离 | 并发请求的 query 不串、会话/身份不串 | `testConcurrentRequestsAreIsolated`、`testConcurrentSessionsAndIdentitiesAreIsolated` |
+| Widget `begin()` / `end()` | 栈在协程上下文里。两个请求交叉 begin/end 不会弹错对象 | `WidgetStackTest` |
 
 非 HTTP 域由既有目录覆盖：AR/关联/事务/校验器/行为/助手（`tests/framework/`）、
 连接池（`tests/pools/`）、DB（`tests/db/`）、Redis（`tests/redis/`）、

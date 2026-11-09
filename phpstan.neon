@@ -5,6 +5,9 @@ parameters:
         - tests
     excludePaths:
         - tests/data
+        # Same class name as yiisoft/yii2 base/Widget.php. It is loaded only
+        # through Yii::$classMap, not as a second definition to analyse.
+        - src/Runtime/compat/Widget.php
     scanFiles:
         - vendor/yiisoft/yii2/Yii.php
     scanDirectories:
