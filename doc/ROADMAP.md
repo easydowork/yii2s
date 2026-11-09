@@ -81,6 +81,7 @@
 | **`renderExceptionResponse` 加固** | ✅ | 错误动作再抛异常时路径更稳 | 兜底 `end()` 包 try/catch，响应已部分写入也不会再抛 |
 | **发布** | 🚧 | `v1.0.0` 已打 tag（2026-11-08 重建至 `cd2b0ff`）；剩 Packagist + 版本冻结 + 升级指南 | 可 `composer require` 到固定版本 |
 | **soak.php 多实例口径** | ⬜ | `pool snapshot` 的 first→last 差值在 upstream 多实例场景跨实例不可比（演练中出现负数差值） | 采样携带实例标识（host:port），差值按同一实例计算；多实例时输出逐实例快照 |
+| **协程 session 的 beforeAction 时机** | ⬜ | stock `yii\filters\RateLimiter` 在 beforeAction 阶段 identity/session 未就绪（实测：filter 内 `session_id=''`、identity=null，同一请求的 action 里 User#1 正常）→ filter 对匿名/登录一律跳过限流；`User` 已实现 `RateLimitInterface`（allowance 存 Redis）备用，blog demo 暂用 IP 级 Resilience\RateLimiter（实测工作） | 深挖 CoroutineSession 的 open/identity 解析时机（行为改变需谨慎，涉及 user 组件解析链），适配后切换 blog demo 为内置 filter（含 X-Rate-Limit-* 头） |
 
 ### 过程中新发现并已修复
 

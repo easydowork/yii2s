@@ -5,6 +5,7 @@ namespace app\models;
 use Yii;
 use yii\db\ActiveQuery;
 use yii\db\ActiveRecord;
+use yii\filters\RateLimitInterface;
 use yii\web\IdentityInterface;
 
 /**
@@ -17,7 +18,7 @@ use yii\web\IdentityInterface;
  * @property int $status
  * @property int $created_at
  */
-class User extends ActiveRecord implements IdentityInterface
+class User extends ActiveRecord implements IdentityInterface, RateLimitInterface
 {
     public const ROLE_ADMIN = 'admin';
 
@@ -83,6 +84,33 @@ class User extends ActiveRecord implements IdentityInterface
     public function validateAuthKey($authKey): bool
     {
         return $this->getAuthKey() === $authKey;
+    }
+
+    /**
+     * Rate-limit contract for `yii\filters\RateLimiter`: 10 requests per
+     * 10 seconds per user. The allowance lives in Redis (coroutine pool),
+     * so concurrent requests from the same user share one bucket.
+     */
+    public function getRateLimit($request, $action): array
+    {
+        return [10, 10];
+    }
+
+    public function loadAllowance($request, $action): array
+    {
+        $raw = Yii::$app->redis->get('blog:rl:' . $this->getId());
+
+        return $raw !== false && $raw !== null
+            ? array_map('intval', json_decode((string) $raw, true))
+            : [10, time()];
+    }
+
+    public function saveAllowance($request, $action, $allowance, $timestamp): void
+    {
+        Yii::$app->redis->set(
+            'blog:rl:' . $this->getId(),
+            json_encode([(int) $allowance, (int) $timestamp])
+        );
     }
 
     public function validatePassword(string $password): bool

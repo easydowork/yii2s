@@ -126,11 +126,20 @@ class SiteController extends Controller
      * Security demo: RateLimiter in front of an API-ish endpoint.
      * 10 requests per 10s per client IP; over the limit answers 429.
      */
+    /**
+     * Security demo: IP-based rate limiting (10 req / 10s per client IP) via
+     * the yii2s Resilience\RateLimiter (Redis fixed window, coroutine pool).
+     *
+     * NOTE on the stock `yii\filters\RateLimiter`: it skips limiting when the
+     * identity is null, and in a coroutine environment the identity is NOT
+     * yet resolvable at the beforeAction stage (session/cookie read returns
+     * empty there - verified: session_id='' in the filter vs User#1 in the
+     * action). Wiring it up needs the coroutine session identity timing to be
+     * solved first (see ROADMAP). Until then, an IP-keyed limiter covers the
+     * anonymous-API case, which the stock filter does not address anyway.
+     */
     public function actionApi(): void
     {
-        // Built inline: component definitions resolve through the DI
-        // container (see the note in config/web.php), and the redis
-        // application component lives in the service locator, not there.
         $limiter = new \Yii2S\Swoole\Resilience\RateLimiter(
             Yii::$app->get('redis')
         );
