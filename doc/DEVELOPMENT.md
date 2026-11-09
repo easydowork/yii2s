@@ -145,10 +145,10 @@ php yii swoole/check                                # 配置体检（Application
 php yii queue/serve [--limit=N]                     # 队列消费 worker（无限轮询）
 ```
 
-**开发热重载**：`--watch` 修改 `@app` 下 PHP 文件后自动优雅重启（约 1 秒内完成，
-在途请求不中断）。轮询 mtime 实现、零外部依赖，Linux/macOS 行为一致。
+**开发热重载**：`--watch` 修改 `@app` 下 PHP 文件后自动重载 worker（约 1 秒内完成，
+在途请求不中断）。监视进程不退出，同一次启动里可以连续改。轮询 mtime、零外部依赖。
 可调：`watchDirs`（默认 `@app`）、`watchInterval`（0.5s）、`watchExcludes`。
-**开发专用**——重启进程，生产禁止。
+**开发专用**，生产不要开。master 在启动前已经加载的类（`vendor`、插件自身）不会被这次重载换掉。
 
 `request/response/session/user` 由框架每请求自动重建；生命周期插槽（定时任务等）
 与更多接入细节见 [第四部分](#第四部分--运维与部署) 与 [第六部分](#第六部分--扩展与路线图)。
@@ -820,16 +820,39 @@ Log（`tests/log/`）、控制台（`tests/console/`）、上传/web（`tests/we
 | **Memcached** | pecl memcached → 需验证 hook 覆盖 | 待实测 | P3 | Redis 已覆盖多数场景 |
 | **Elasticsearch** | HTTP REST（Guzzle/cURL） | 中 | P3 | `HOOK_CURL`/`HOOK_NATIVE_CURL` 可协程化，但 6.x 有已知边界（HOOK_ALL 默认排除） |
 
-### 通用接入模式
+### 为什么没有池父类
+
+MySQL 组件必须继承 `yii\db\Connection`，Redis 组件必须继承 `yii\base\Component`。PHP 一个类只能有一个父类，池逻辑不能再占这个位置，否则组件就接不回 Yii。
+
+池本体 `Pools\ConnectionPool` 已经与客户端无关。它只收三件事：怎么创建、怎么销毁、空闲时怎么探活。借出的对象粘在当前协程上，请求结束由 `RequestStateManager` 归还。它发现池组件只看 `HasConnectionPool`，不认类名，所以新服务不用改清理代码。
+
+配置项在 `PooledConnectionTrait` 里：`poolMaxActive`、`poolWaitTimeout`、`poolMinIdle`、`poolMaxLifetime`、`poolIdleTimeout`、`enableHealthCheck`、`enableCoroutinePooling`、熔断开关。这个 trait 不包含 `borrow()` / `release()`。借还要按客户端类型写，上下文键也各写各的。MySQL 还要按主从把 `poolMaxActive` 拆成槽位数，这放不进一个公共父类。
+
+### 接一个新客户端
+
+1. 组件类继承它在 Yii 里本来的父类，`use PooledConnectionTrait`，实现 `HasConnectionPool`。
+2. `getPool()` 里第一次调用时创建 `ConnectionPool`，传入 factory、destroyer、validator。factory 里建一条新连接。destroyer 里关掉它。validator 在 `enableHealthCheck` 为真时才传，例如 `SELECT 1` 或 `PING`。
+3. `borrow()`：不在协程里时用一条脱离池的连接。在协程里用 `CoroutineContext` 记住这次借到的对象，同一协程再次 `borrow()` 返回同一条，保证事务和多条命令落在同一连接上。键用固定前缀加 `spl_object_id($this)`，避免同一个类的两个组件串连接。
+4. `release()`：从上下文取出连接，交给 `getPool()->return()`。连接已经坏了就 `discard()`，不要还回去。可重复调用，没有借出时什么都不做。
+5. 业务方法先 `borrow()` 再发命令。熔断包住会出错的那次网络调用，不要包住 `borrow()` 本身，否则只挡住第一次建连，挡不住请求中途断开。
 
 ```php
-$pool = new ConnectionPool(
-    factory: fn () => new PDO($dsn, $user, $pass),   // hook 协程化
-    validator: fn ($pdo) => $pdo->query('SELECT 1') !== false,
-    destroyer: fn ($pdo) => $pdo = null,
-    maxActive: 20,
-);
+public function getPool(): ConnectionPool
+{
+    return $this->pool ??= new ConnectionPool(
+        fn (): Client => $this->createConnection(),
+        $this->poolMaxActive,
+        $this->poolWaitTimeout,
+        function (Client $client): void { $client->close(); },
+        $this->enableHealthCheck ? fn (Client $client): bool => $client->ping() : null,
+        $this->poolMinIdle,
+        $this->poolMaxLifetime,
+        $this->poolIdleTimeout,
+    );
+}
 ```
+
+客户端的阻塞调用必须能让出协程，否则一个慢请求会卡住整个 worker。PDO、phpredis 靠 `SWOOLE_HOOK_ALL`。C 扩展自己管 socket、hook 盖不住的（例如 librdkafka），不要放进这个池。长连接推送的消费者要独占一条连接，只把生产者放进池。
 
 ### 排期建议
 

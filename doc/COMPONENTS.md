@@ -103,9 +103,11 @@ pid 文件读写与进程存活判断。
 
 ### `ConnectionPool` / `PooledConnectionTrait` / `HasConnectionPool` / `PoolMetricsCollector`
 
-- `ConnectionPool`：协程 Channel 连接池（borrow/return/discard/sweep/maintain）。
-- `PooledConnectionTrait`：db/redis 共享的池管理逻辑（配置字段、getPool、熔断、归还/丢弃、关闭）。
-- `HasConnectionPool`：池组件契约（`getPool()` + `release()`），基础设施据此发现池组件。
+池本体与客户端无关。新服务不继承池父类：MySQL 的父类必须是 `yii\db\Connection`，Redis 的父类必须是 `yii\base\Component`。接法写在 `doc/DEVELOPMENT.md` 的「6.2 连接池扩展规划」。
+
+- `ConnectionPool`：协程 Channel 连接池（borrow/return/discard/sweep/maintain）。创建、销毁、探活由调用方传入。
+- `PooledConnectionTrait`：池容量、等待、空闲回收、熔断这些配置。不包含 `borrow()` / `release()`。
+- `HasConnectionPool`：`getPool()` + `release()`。请求结束和 `/__pool` 靠它找到池，不认具体类名。
 - `PoolMetricsCollector`：发现并采集所有池组件的指标。
 
 ---

@@ -543,7 +543,6 @@ class HttpServer extends Component
             $this->isRunning = false;
             $this->server = null;
             if ($this->watchdog !== null) {
-                // The watchdog may already have exited after sending SIGUSR1.
                 @Process::kill($this->watchdog->pid, SIGTERM);
                 $this->watchdog = null;
             }
@@ -678,7 +677,8 @@ class HttpServer extends Component
      * Development-only hot reload: a dedicated process polls watched
      * directories and sends SIGUSR1 (Swoole's native graceful reload) to the
      * master when a PHP file changes. Reload restarts the workers, which pick
-     * up the fresh code on the next request.
+     * up the fresh code on the next request. The process keeps polling, so
+     * later edits reload again without restarting the server.
      */
     private function startWatchdog(): void
     {
@@ -702,13 +702,12 @@ class HttpServer extends Component
                         return; // master exited; nothing left to reload
                     }
 
-                    if ($scan() !== $snapshot) {
+                    $current = $scan();
+                    if ($current !== $snapshot) {
                         @posix_kill($masterPid, SIGUSR1);
-
-                        return;
                     }
 
-                    $snapshot = $scan();
+                    $snapshot = $current;
                 }
             },
             false,

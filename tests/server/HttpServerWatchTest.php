@@ -64,6 +64,13 @@ class HttpServerWatchTest extends ServerTestCase
                 $this->waitFor(function () use ($pid1): bool {
                     return (int) $this->get('/pid')['body'] !== $pid1;
                 }, 8.0);
+
+                // The watcher stays up, so a later edit reloads again.
+                $pid2 = (int) $this->get('/pid')['body'];
+                file_put_contents($this->watchDir . '/changed-again.php', '<?php return 4;');
+                $this->waitFor(function () use ($pid2): bool {
+                    return (int) $this->get('/pid')['body'] !== $pid2;
+                }, 8.0);
             } finally {
                 $this->stopServer();
             }
