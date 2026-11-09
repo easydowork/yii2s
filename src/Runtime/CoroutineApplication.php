@@ -34,6 +34,8 @@ use yii\web\Application;
  * and reports errors for several requests at once. A shared view leaks
  * `title` / `params` / asset registrations across those requests, and a shared
  * error handler leaks `exception` into another request's error page.
+ * `formatter` is in that set because its `init()` copies `language` into
+ * `locale` once; a shared formatter would keep the first request's language.
  *
  * Applications are instantiated as this class by
  * [[\Yii2S\Swoole\Server\RequestDispatcher]] when they do not configure their
@@ -44,7 +46,21 @@ class CoroutineApplication extends Application
     /**
      * Component ids that hold per-request state.
      */
-    public const REQUEST_SCOPED_COMPONENTS = ['request', 'response', 'session', 'user', 'view', 'errorHandler'];
+    public const REQUEST_SCOPED_COMPONENTS = ['request', 'response', 'session', 'user', 'view', 'errorHandler', 'formatter'];
+
+    private const LANGUAGE_CONTEXT_KEY = 'yii2s.app.language';
+
+    /**
+     * Worker-wide default. A coroutine that assigns [[$language]] stores its
+     * own value in the coroutine context and leaves this alone.
+     */
+    private string $defaultLanguage = 'en-US';
+
+    /**
+     * False while [[__construct()]] is still applying configuration, so that
+     * assignment becomes the default instead of a one-request override.
+     */
+    private bool $languageOverride = false;
 
     /**
      * @param array<string, mixed> $config
@@ -54,7 +70,44 @@ class CoroutineApplication extends Application
         // Yii.php replaces Yii::$classMap. Swap in the coroutine classes
         // before a view or anything else loads the stock ones.
         ClassMap::install();
+        // The parent declares a public property, so `$app->language` would
+        // ignore getLanguage()/setLanguage(). Unset makes those calls go
+        // through Component::__get/__set.
+        unset($this->language);
         parent::__construct($config);
+        $this->languageOverride = true;
+    }
+
+    /**
+     * End-user language for this coroutine, or the worker default when this
+     * coroutine has not chosen one.
+     */
+    public function getLanguage(): string
+    {
+        if (Coroutine::getCid() !== -1) {
+            $override = CoroutineContext::get(self::LANGUAGE_CONTEXT_KEY);
+            if (is_string($override)) {
+                return $override;
+            }
+        }
+
+        return $this->defaultLanguage;
+    }
+
+    /**
+     * Sets the end-user language. Inside a coroutine this stays on that
+     * coroutine. During construction, and outside a coroutine, it changes the
+     * worker default.
+     */
+    public function setLanguage(string $language): void
+    {
+        if ($this->languageOverride && Coroutine::getCid() !== -1) {
+            CoroutineContext::set(self::LANGUAGE_CONTEXT_KEY, $language);
+
+            return;
+        }
+
+        $this->defaultLanguage = $language;
     }
 
     private const CONTEXT_KEY_PREFIX = 'yii2s.app.component.';

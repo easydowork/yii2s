@@ -901,9 +901,10 @@ public function getPool(): ConnectionPool
    的 notice/warning 都会在下个请求爆发；第三方库的噪音要显式 try/catch 或关闭该库的警告路径。
 10. **日志缓冲必须加互斥锁** —— 每请求 flush 并发读改写 `messages`（Channel 互斥锁）；
     **锁的懒初始化必须留在协程内**（协程外 push Channel 令牌静默失败 → 死锁，实测）。
-11. **`$_FILES` 要按请求填充并 reset `UploadedFile` 静态缓存** —— 官方 `UploadedFile::loadFiles()`
-    直读 `$_FILES` 超全局；静态缓存跨请求泄漏会串文件。带文件的请求拿一把 worker 级锁再写入，
-    请求结束才清空。没有上传的请求不能去清这张表。
+11. **协程里的请求不写 `$_FILES`** —— 官方 `UploadedFile` 读这张进程级表和自己的静态缓存，
+    协程里既看不到本次上传，也不会读到别的请求的文件。读和落盘用 `CoroutineUploadedFile`
+    （`saveAs()` 不走 `move_uploaded_file()`）。不在协程里时（命令行、单测）仍会写入 `$_FILES`，
+    请求结束只清这一路。
 12. **Cookie 必须走签名验证通道** —— "官方静态 API 依赖进程态"的模式；协程组件覆写时
     逐条对照官方实现（`loadCookies` 的 validateData 不可省）。
 13. **Swoole `cookie()` 自动 urlencode，`rawcookie()` 不编** —— 与 PHP `setcookie()` 对齐；

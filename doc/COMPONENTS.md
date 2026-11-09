@@ -64,7 +64,7 @@ pid 文件读写与进程存活判断。
 
 | 类 | 职责 |
 |---|---|
-| `CoroutineApplication` | 按协程创建 request/response/session/user/view/errorHandler |
+| `CoroutineApplication` | 按协程创建 request/response/session/user/view/errorHandler/formatter。`language` 在协程里赋值只影响当前协程 |
 | `CoroutineRequest` | 从 Swoole request 读 query/body/header/cookie。协程内不写进程级 `$_FILES` |
 | `CoroutineResponse` | 内存中完成格式化的响应 |
 | `CoroutineUploadedFile` | 协程安全上传（`saveAs` 支持 Swoole 临时文件） |
