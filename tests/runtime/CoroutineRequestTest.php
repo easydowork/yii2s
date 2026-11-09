@@ -207,4 +207,48 @@ class CoroutineRequestTest extends TestCase
         $request = new CoroutineRequest(['cookieValidationKey' => 'test']);
         $this->assertInstanceOf(Request::class, $request);
     }
+
+    public function testOverlappingUploadsKeepTheirOwnFilesTable(): void
+    {
+        $this->runInCoroutine(function (): void {
+            $channel = new \Swoole\Coroutine\Channel(2);
+            foreach (['a.txt', 'b.txt'] as $name) {
+                \Swoole\Coroutine::create(function () use ($name, $channel): void {
+                    $request = new CoroutineRequest(['cookieValidationKey' => 'test']);
+                    $request->setSwooleRequest($this->uploadRequest($name));
+                    $global = $_FILES['upload']['name'] ?? null;
+                    \Swoole\Coroutine::sleep(0.05);
+                    $globalAfter = $_FILES['upload']['name'] ?? null;
+                    $mine = $request->getFileParams()['upload']['name'] ?? null;
+                    $channel->push([$name, $global, $globalAfter, $mine]);
+                });
+            }
+
+            $results = [$channel->pop(2), $channel->pop(2)];
+            foreach ($results as [$name, $global, $globalAfter, $mine]) {
+                $this->assertNull($global);
+                $this->assertNull($globalAfter, 'a coroutine request must not publish $_FILES');
+                $this->assertSame($name, $mine);
+            }
+            $this->assertSame([], $_FILES);
+        });
+    }
+
+    private function uploadRequest(string $name): \Swoole\Http\Request
+    {
+        $request = $this->createSwooleRequest([
+            'server' => ['request_method' => 'POST', 'request_uri' => '/upload'],
+        ]);
+        $request->files = [
+            'upload' => [
+                'name' => $name,
+                'type' => 'text/plain',
+                'tmp_name' => '/tmp/' . $name,
+                'size' => 1,
+                'error' => 0,
+            ],
+        ];
+
+        return $request;
+    }
 }

@@ -17,10 +17,10 @@ use Yii2S\Swoole\Redis\CoroutineRedisConnection;
  * `/metrics` endpoint reports the whole server, not just the worker that
  * happened to serve the scrape request.
  *
- * Each worker writes its snapshot to `{prefix}worker:{pid}` on every scrape and
- * the reading worker sums the counters, adds up the gauges and keeps the
- * per-worker memory as a labelled metric. Snapshots carry a short TTL so a
- * dead worker drops out of the aggregation automatically.
+ * Each worker writes its snapshot to `{prefix}worker:{pid}` and adds that key
+ * to `{prefix}workers`. The reading worker walks the set. A snapshot that has
+ * expired (the worker is gone) is removed from the set, so a scrape never
+ * runs `KEYS`.
  */
 class MetricsAggregator
 {
@@ -34,7 +34,18 @@ class MetricsAggregator
     }
 
     /**
+     * How often a worker should call [[publish()]] so its snapshot outlives
+     * [[$ttl]] even when this worker never serves `/metrics`.
+     */
+    public const PUBLISH_INTERVAL = 10.0;
+
+    /**
      * Publishes this worker's snapshot and renders the aggregated metrics.
+     *
+     * The publish keeps the worker that happens to serve the scrape fresh.
+     * Every other worker must also call [[publish()]] on a timer: with the
+     * default connection-sticky dispatch, a scraper talks to one worker and
+     * the rest would otherwise age out of the index.
      *
      * @param array<string, array<string, int|bool>> $pools this worker's pool metrics
      */
@@ -42,10 +53,22 @@ class MetricsAggregator
     {
         $this->publish($metrics, $pools);
 
+        return $this->renderPublished($metrics);
+    }
+
+    /**
+     * Renders whatever workers have already published, without writing this
+     * worker's snapshot. Useful when the caller only wants to read.
+     */
+    public function renderPublished(RequestMetrics $metrics): string
+    {
         return $metrics->renderAggregate($this->collect());
     }
 
-    private function publish(RequestMetrics $metrics, array $pools): void
+    /**
+     * @param array<string, array<string, int|bool>> $pools this worker's pool metrics
+     */
+    public function publish(RequestMetrics $metrics, array $pools): void
     {
         $snapshot = $metrics->snapshot();
         $snapshot += [
@@ -55,11 +78,23 @@ class MetricsAggregator
             'pools' => $pools,
         ];
 
+        $key = $this->workerKey((int) getmypid());
         $this->redis->executeCommand('SET', [
-            $this->prefix . 'worker:' . getmypid(),
+            $key,
             (string) json_encode($snapshot),
             ['EX' => $this->ttl],
         ]);
+        $this->redis->executeCommand('SADD', [$this->indexKey(), $key]);
+    }
+
+    private function indexKey(): string
+    {
+        return $this->prefix . 'workers';
+    }
+
+    private function workerKey(int $pid): string
+    {
+        return $this->prefix . 'worker:' . $pid;
     }
 
     /**
@@ -69,14 +104,18 @@ class MetricsAggregator
     {
         $aggregate = ['byMethod' => [], 'inProgress' => 0, 'memory' => [], 'coroutines' => 0, 'pools' => []];
 
-        $keys = $this->redis->executeCommand('KEYS', [$this->prefix . 'worker:*']);
+        $keys = $this->redis->executeCommand('SMEMBERS', [$this->indexKey()]);
         if (!is_array($keys)) {
             return $aggregate;
         }
 
         foreach ($keys as $key) {
+            $key = (string) $key;
             $data = $this->redis->executeCommand('GET', [$key]);
             if (!is_string($data)) {
+                // The snapshot TTL elapsed with the worker. Drop the index
+                // entry so later scrapes do not keep asking for it.
+                $this->redis->executeCommand('SREM', [$this->indexKey(), $key]);
                 continue;
             }
             $snapshot = json_decode($data, true);

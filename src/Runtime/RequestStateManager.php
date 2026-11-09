@@ -12,6 +12,7 @@ namespace Yii2S\Swoole\Runtime;
 
 use Yii;
 use Yii2S\Swoole\Pools\HasConnectionPool;
+use Yii2S\Swoole\Session\CoroutineSession;
 use yii\base\Application;
 use yii\web\Application as WebApplication;
 
@@ -70,17 +71,24 @@ class RequestStateManager
     {
         self::$activeRequests--;
 
-        // Drop the per-request $_FILES population and UploadedFile's static
-        // cache (see CoroutineRequest::setSwooleRequest()) - only when this
-        // request actually populated them; plain JSON requests skip it.
-        if ($_FILES !== []) {
-            $_FILES = [];
-            if (class_exists(\yii\web\UploadedFile::class)) {
-                \yii\web\UploadedFile::reset();
+        // Persist and unlock the session before pooled Redis connections are
+        // returned. A session left open keeps its lock until the TTL.
+        try {
+            if ($app->has('session', true)) {
+                $session = $app->get('session', false);
+                if ($session instanceof CoroutineSession && $session->getIsActive()) {
+                    $session->close();
+                }
             }
+        } catch (\Throwable $e) {
+            Yii::error('Failed to close the session: ' . $e->getMessage(), __METHOD__);
         }
 
-        // CoroutineApplication resolves these four ids from the coroutine
+        // Clears $_FILES only when this call is outside a coroutine.
+        // Coroutine requests never publish that table.
+        CoroutineRequest::releaseUploadedFiles();
+
+        // CoroutineApplication resolves request-scoped ids from the coroutine
         // context, so the shared definitions never hold a stale instance and
         // do not need to be reset on every request.
         if (!$app instanceof CoroutineApplication) {

@@ -60,7 +60,7 @@ class CoroutineDbConnection extends Connection implements HasConnectionPool
         if ($this->pool === null) {
             $this->pool = new ConnectionPool(
                 fn (): Connection => $this->createPooledConnection(),
-                $this->poolMaxActive,
+                $this->poolSlotLimit(),
                 $this->poolWaitTimeout,
                 function (Connection $connection): void {
                     $connection->close();
@@ -291,6 +291,22 @@ class CoroutineDbConnection extends Connection implements HasConnectionPool
         }
 
         return $this->borrow()->quoteSql($sql);
+    }
+
+    /**
+     * How many pooled connection objects fit in [[poolMaxActive]].
+     *
+     * `poolMaxActive` is the MySQL connection budget. A pooled object with
+     * slaves enabled opens a master PDO and a slave PDO, so each object
+     * spends two sockets. The pool therefore holds half as many objects.
+     * Routing between those sockets is still Yii's own master/slave logic;
+     * this only keeps the socket count inside the budget.
+     */
+    private function poolSlotLimit(): int
+    {
+        $socketsPerObject = ($this->enableSlaves && $this->slaves !== []) ? 2 : 1;
+
+        return max(1, intdiv($this->poolMaxActive, $socketsPerObject));
     }
 
     /**

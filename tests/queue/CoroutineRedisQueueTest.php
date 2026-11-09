@@ -41,6 +41,7 @@ class CoroutineRedisQueueTest extends TestCase
         $this->runInCoroutine(function (): void {
             $this->redis->del(
                 'yii2s:queue:' . $this->queue->channel . ':delayed',
+                'yii2s:queue:' . $this->queue->channel . ':reserved',
                 'yii2s:queue:' . $this->queue->channel . ':dead'
             );
         });
@@ -62,8 +63,9 @@ class CoroutineRedisQueueTest extends TestCase
             $this->assertSame('mail', $job['payload']['action']);
             $this->assertSame(0, $job['attempts']);
 
-            // The reserved job is no longer pending.
+            // The job left the waiting set but is still reserved until ack.
             $this->assertSame(0, $this->queue->countPending());
+            $this->assertSame(1, $this->queue->countReserved());
             $this->assertNull($this->queue->reserve());
         });
     }
@@ -93,6 +95,7 @@ class CoroutineRedisQueueTest extends TestCase
             sort($seen);
             $this->assertSame([1, 2, 3], $seen);
             $this->assertSame(0, $this->queue->countPending());
+            $this->assertSame(0, $this->queue->countReserved());
         });
     }
 
@@ -127,6 +130,29 @@ class CoroutineRedisQueueTest extends TestCase
 
             $this->assertSame(0, $queue->countPending());
             $this->assertSame(1, $queue->countDead());
+        });
+    }
+
+    public function testExpiredReservationIsRequeuedAsAFailedAttempt(): void
+    {
+        $this->runInCoroutine(function (): void {
+            $id = $this->queue->push(['n' => 1]);
+            $job = $this->queue->reserve();
+            $this->assertIsArray($job);
+            $this->assertSame($id, $job['id']);
+
+            $reservedKey = 'yii2s:queue:' . $this->queue->channel . ':reserved';
+            $members = $this->redis->zRangeByScore($reservedKey, '-inf', '+inf', ['limit' => [0, 1]]);
+            $this->assertIsArray($members);
+            $this->assertCount(1, $members);
+            $this->redis->zAdd($reservedKey, (string) (time() - 5), (string) $members[0]);
+
+            $again = $this->queue->reserve();
+            $this->assertIsArray($again);
+            $this->assertSame($id, $again['id']);
+            $this->assertSame(1, $again['attempts'], 'a crashed reservation counts as a failed attempt');
+            $this->assertSame(1, $this->queue->countReserved());
+            $this->assertSame(0, $this->queue->countPending());
         });
     }
 

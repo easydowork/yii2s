@@ -149,4 +149,57 @@ class CoroutineSessionTest extends TestCase
             $this->assertCount(0, $session);
         });
     }
+
+    public function testConcurrentWritersDoNotOverwriteEachOther(): void
+    {
+        $this->runInCoroutine(function (): void {
+            $id = 'sess-lock-' . bin2hex(random_bytes(4));
+            $first = new CoroutineSession(['redis' => $this->redis]);
+            $second = new CoroutineSession(['redis' => $this->redis]);
+            $ready = new \Swoole\Coroutine\Channel(1);
+
+            \Swoole\Coroutine::create(function () use ($first, $id, $ready): void {
+                $first->setId($id);
+                $first->open();
+                $first->set('n', 1);
+                $ready->push(true);
+                \Swoole\Coroutine::sleep(0.15);
+                $first->close();
+            });
+            $ready->pop(2);
+
+            $started = microtime(true);
+            $second->setId($id);
+            $second->open();
+            $this->assertGreaterThan(0.05, microtime(true) - $started);
+            $this->assertSame(1, $second->get('n'));
+            $second->set('extra', 'kept');
+            $second->close();
+
+            $check = new CoroutineSession(['redis' => $this->redis]);
+            $check->setId($id);
+            $check->open();
+            $this->assertSame(1, $check->get('n'));
+            $this->assertSame('kept', $check->get('extra'));
+            $check->close();
+        });
+    }
+
+    public function testForgedObjectInSessionIsNotInstantiated(): void
+    {
+        $this->runInCoroutine(function (): void {
+            $id = 'sess-object-' . bin2hex(random_bytes(4));
+            $this->redis->set(
+                'yii2s:session:' . $id,
+                serialize(['ok' => 'yes', 'bad' => new \stdClass()])
+            );
+
+            $session = Yii::$app->session;
+            $session->setId($id);
+            $session->open();
+
+            $this->assertSame('yes', $session->get('ok'));
+            $this->assertNotInstanceOf(\stdClass::class, $session->get('bad'));
+        });
+    }
 }

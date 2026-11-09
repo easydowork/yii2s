@@ -60,6 +60,8 @@ class Bootstrap implements BootstrapInterface
 
     public function bootstrap($app): void
     {
+        Log\CoroutineLogger::install();
+
         $memoryLimit = getenv('SWOOLE_MEMORY_LIMIT') ?: $this->memoryLimit;
         if ($memoryLimit) {
             ini_set('memory_limit', (string) $memoryLimit);

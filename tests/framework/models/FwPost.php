@@ -61,7 +61,7 @@ class FwPost extends ActiveRecord
             [
                 'class' => SluggableBehavior::class,
                 'attribute' => 'title',
-                'ensureUnique' => false,
+                'ensureUnique' => true,
             ],
         ];
     }

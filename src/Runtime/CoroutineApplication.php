@@ -25,10 +25,15 @@ use yii\web\Application;
  * components only after a request is not enough - the race happens while both
  * requests are in flight.
  *
- * This subclass resolves the four request-scoped ids from the coroutine
- * context instead of the shared component cache, creating one instance per
- * coroutine from the configured definition. Everything else (db, redis,
- * cache, pools, log, ...) stays shared, which is what makes the server fast.
+ * This subclass resolves the request-scoped ids from the coroutine context
+ * instead of the shared component cache, creating one instance per coroutine
+ * from the configured definition. Everything else (db, redis, cache, pools,
+ * log, ...) stays shared, which is what makes the server fast.
+ *
+ * `view` and `errorHandler` are in that set because a resident worker renders
+ * and reports errors for several requests at once. A shared view leaks
+ * `title` / `params` / asset registrations across those requests, and a shared
+ * error handler leaks `exception` into another request's error page.
  *
  * Applications are instantiated as this class by
  * [[\Yii2S\Swoole\Server\RequestDispatcher]] when they do not configure their
@@ -39,7 +44,7 @@ class CoroutineApplication extends Application
     /**
      * Component ids that hold per-request state.
      */
-    public const REQUEST_SCOPED_COMPONENTS = ['request', 'response', 'session', 'user'];
+    public const REQUEST_SCOPED_COMPONENTS = ['request', 'response', 'session', 'user', 'view', 'errorHandler'];
 
     private const CONTEXT_KEY_PREFIX = 'yii2s.app.component.';
 
@@ -108,5 +113,31 @@ class CoroutineApplication extends Application
         CoroutineContext::set($key, $component);
 
         return $component;
+    }
+
+    /**
+     * Loads the logged-in identity before controller filters run.
+     *
+     * `yii\filters\RateLimiter` calls `getIdentity(false)`, which does not
+     * open the session. Touching the identity here, only when the request
+     * already carries a session id, makes that filter see the same user the
+     * action will see.
+     */
+    public function restoreIdentity(): void
+    {
+        $definition = $this->getComponents(true)['user'] ?? null;
+        if (!is_array($definition) || empty($definition['identityClass'])) {
+            return;
+        }
+
+        try {
+            $session = $this->getSession();
+            if (!$session->getHasSessionId() && !$session->getIsActive()) {
+                return;
+            }
+            $this->getUser()->getIdentity();
+        } catch (\Throwable $e) {
+            Yii::warning('Failed to restore the user identity: ' . $e->getMessage(), __METHOD__);
+        }
     }
 }

@@ -15,6 +15,9 @@ use yii\db\ActiveRecord;
 use yii\helpers\ArrayHelper;
 use yii\web\IdentityInterface;
 use yii\web\User;
+use Yii2S\Swoole\Runtime\CoroutineApplication;
+use Yii2S\Swoole\Runtime\CoroutineRequest;
+use Yii2S\Swoole\Runtime\CoroutineResponse;
 use Yii2S\Swoole\Session\CoroutineSession;
 use yii2stest\TestCase;
 
@@ -67,6 +70,76 @@ class UserSessionFlowTest extends TestCase
             $this->assertTrue($user3->getIsGuest(), 'logout must persist across request rebuilds');
             $this->assertNull($user3->getId());
         });
+    }
+
+    public function testIdentityIsRestoredBeforeFiltersAsk(): void
+    {
+        $dir = sys_get_temp_dir() . '/yii2s-identity-' . bin2hex(random_bytes(4));
+        mkdir($dir);
+        file_put_contents($dir . '/index.php', '<?php');
+
+        try {
+            $this->runInCoroutine(function () use ($dir): void {
+                $app = $this->buildWebApp('sess-filter-' . bin2hex(random_bytes(8)));
+                $app->getUser()->login(UserFlowIdentity::findIdentity(2));
+                $sessionId = $app->getSession()->getId();
+                $app->getSession()->close();
+                $db = $app->get('db');
+                $redis = $app->get('redis');
+
+                $resident = new CoroutineApplication([
+                    'id' => 'identity-restore',
+                    'basePath' => $dir,
+                    'components' => [
+                        'db' => $db,
+                        'redis' => $redis,
+                        'request' => [
+                            'class' => CoroutineRequest::class,
+                            'cookieValidationKey' => 'identity-restore-key',
+                            'enableCookieValidation' => false,
+                            'enableCsrfValidation' => false,
+                            'scriptFile' => $dir . '/index.php',
+                            'scriptUrl' => '/index.php',
+                        ],
+                        'response' => ['class' => CoroutineResponse::class],
+                        'session' => [
+                            'class' => CoroutineSession::class,
+                            'redis' => 'redis',
+                            'timeout' => 60,
+                        ],
+                        'user' => [
+                            'class' => User::class,
+                            'identityClass' => UserFlowIdentity::class,
+                            'enableSession' => true,
+                            'enableAutoLogin' => false,
+                        ],
+                    ],
+                ]);
+
+                $swooleRequest = new \Swoole\Http\Request();
+                $swooleRequest->cookie = ['PHPSESSID' => $sessionId];
+                $swooleRequest->header = [];
+                $swooleRequest->get = [];
+                $swooleRequest->server = [
+                    'request_method' => 'GET',
+                    'request_uri' => '/',
+                    'remote_addr' => '127.0.0.1',
+                ];
+                $resident->getRequest()->setSwooleRequest($swooleRequest);
+
+                $this->assertNull(
+                    $resident->getUser()->getIdentity(false),
+                    'the filter reads getIdentity(false) before anything else opens the session'
+                );
+                $resident->restoreIdentity();
+                $identity = $resident->getUser()->getIdentity(false);
+                $this->assertNotNull($identity);
+                $this->assertSame(2, $identity->getId());
+            });
+        } finally {
+            @unlink($dir . '/index.php');
+            @rmdir($dir);
+        }
     }
 
     /**

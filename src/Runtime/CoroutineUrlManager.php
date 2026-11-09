@@ -17,8 +17,10 @@ use yii\web\UrlManager;
  *
  * Route matching walks every rule on every request, which is a real cost once
  * an app grows a large rule table (the resident process pays it forever). The
- * result of [[parseRequest()]] only depends on the request method + path and
- * the (static) rules, so it can be memoized safely.
+ * result of [[parseRequest()]] depends on the request method, host and path
+ * and the (static) rules, so it can be memoized safely. Host is part of the
+ * key because a rule may match `http://admin.example.com/...` and a different
+ * rule the same path on another host.
  *
  * The cache is a bounded per-process array, not Redis: it holds plain
  * `[route, params]` results, is never evicted across requests within a worker,
@@ -42,7 +44,7 @@ class CoroutineUrlManager extends UrlManager
             return parent::parseRequest($request);
         }
 
-        $key = $request->getMethod() . ' ' . $request->getPathInfo();
+        $key = $request->getMethod() . ' ' . (string) $request->getHostInfo() . ' ' . $request->getPathInfo();
         if (array_key_exists($key, $this->parseCache)) {
             return $this->parseCache[$key];
         }

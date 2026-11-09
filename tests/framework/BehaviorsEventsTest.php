@@ -62,17 +62,16 @@ class BehaviorsEventsTest extends TestCase
 
     public function testTimestampAndSluggable(): void
     {
-        $this->markTestSkipped("SluggableBehavior slug generation under coroutine context requires investigation");
-        // Kept as documentation of the pending investigation.
-        // @phpstan-ignore deadCode.unreachable
         $this->runInCoroutine(function (): void {
             $post = new \yii2stest\framework\models\FwPost();
             $post->title = "ts-test";
             $post->content = "x";
             $post->author_id = 1;
-            $this->assertTrue($post->save(false));
+            // SluggableBehavior listens to beforeValidate, not beforeInsert.
+            // save(false) skips that event; this is stock Yii, not a coroutine gap.
+            $this->assertTrue($post->save(), implode(' ', $post->getErrorSummary(true)));
             $this->assertGreaterThan(0, $post->created_at);
-            $this->assertNotNull($post->slug);
+            $this->assertSame('ts-test', $post->slug);
         });
     }
 
@@ -132,21 +131,18 @@ class BehaviorsEventsTest extends TestCase
 
     public function testSluggableGeneratesUniqueSlug(): void
     {
-        $this->markTestSkipped("SluggableBehavior slug generation under coroutine context requires investigation - see pitfall log");
-        // Kept as documentation of the pending investigation.
-        // @phpstan-ignore deadCode.unreachable
         $this->runInCoroutine(function (): void {
             $a = new \yii2stest\framework\models\FwPost();
             $a->title = "Sluggable Test Post";
             $a->content = "x";
             $a->author_id = 1;
-            $a->save(false);
+            $this->assertTrue($a->save(), implode(' ', $a->getErrorSummary(true)));
             $this->assertSame("sluggable-test-post", $a->slug);
             $b = new \yii2stest\framework\models\FwPost();
             $b->title = "Sluggable Test Post";
             $b->content = "x";
             $b->author_id = 1;
-            $b->save(false);
+            $this->assertTrue($b->save(), implode(' ', $b->getErrorSummary(true)));
             $this->assertNotSame($a->slug, $b->slug);
         });
     }

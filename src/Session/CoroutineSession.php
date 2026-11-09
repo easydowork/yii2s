@@ -42,6 +42,24 @@ class CoroutineSession extends Session
 
     private int $timeoutSeconds = 1440;
 
+    /**
+     * Seconds to wait for another request to finish with this session, and the
+     * TTL of the lock itself. A crashed request releases the session when the
+     * TTL expires.
+     */
+    public float $lockTimeout = 5.0;
+
+    private ?string $lockToken = null;
+
+    private ?string $lockedId = null;
+
+    private const RELEASE_LOCK = <<<'LUA'
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+end
+return 0
+LUA;
+
     public function init(): void
     {
         parent::init();
@@ -101,11 +119,18 @@ class CoroutineSession extends Session
         }
 
         $fromClientCookie = $this->resolveId();
+        $this->acquireLock();
         $this->opened = true;
-        $this->loadData($fromClientCookie);
-        $this->updateFlashCounters();
-        $this->touch();
-        $this->sendSessionCookie();
+        try {
+            $this->loadData($fromClientCookie);
+            $this->updateFlashCounters();
+            $this->touch();
+            $this->sendSessionCookie();
+        } catch (\Throwable $e) {
+            $this->opened = false;
+            $this->releaseLock();
+            throw $e;
+        }
     }
 
     public function close(): void
@@ -113,8 +138,12 @@ class CoroutineSession extends Session
         if (!$this->opened) {
             return;
         }
-        $this->persist();
-        $this->opened = false;
+        try {
+            $this->persist();
+        } finally {
+            $this->opened = false;
+            $this->releaseLock();
+        }
     }
 
     public function destroy(): void
@@ -124,6 +153,7 @@ class CoroutineSession extends Session
         }
         $this->data = [];
         $this->opened = false;
+        $this->releaseLock();
         $this->expireSessionCookie();
     }
 
@@ -134,6 +164,8 @@ class CoroutineSession extends Session
             // switching ids so data written earlier in the request (cart,
             // returnUrl, flash) survives a login-triggered regeneration.
             $fromClientCookie = $this->resolveId();
+            $this->acquireLock();
+            $this->opened = true;
             $this->loadData($fromClientCookie);
         }
 
@@ -142,8 +174,14 @@ class CoroutineSession extends Session
             $this->redis->executeCommand('DEL', [$this->keyPrefix . $oldId]);
         }
 
+        $previousId = $this->lockedId;
+        $previousToken = $this->lockToken;
+        $this->lockToken = null;
+        $this->lockedId = null;
         $this->sessionId = $this->generateSessionId();
         $this->idFromClient = false;
+        $this->acquireLock();
+        $this->releaseToken($previousId, $previousToken);
         $this->persist();
         $this->sendSessionCookie();
     }
@@ -360,6 +398,67 @@ class CoroutineSession extends Session
     }
 
     /**
+     * Holds this session id until [[close()]] so two requests cannot read the
+     * same payload and both write it back. The later write would otherwise
+     * erase the earlier one.
+     */
+    private function acquireLock(): void
+    {
+        if ($this->sessionId === null) {
+            return;
+        }
+        if ($this->lockToken !== null && $this->lockedId === $this->sessionId) {
+            return;
+        }
+
+        $token = bin2hex(random_bytes(8));
+        $key = $this->lockKey($this->sessionId);
+        $ttl = max(1, (int) ceil($this->lockTimeout));
+        $deadline = microtime(true) + $this->lockTimeout;
+        while (true) {
+            $result = $this->redis->executeCommand('SET', [$key, $token, ['NX', 'EX' => $ttl]]);
+            if ($result === true || $result === 'OK') {
+                $this->lockToken = $token;
+                $this->lockedId = $this->sessionId;
+
+                return;
+            }
+            if (microtime(true) >= $deadline) {
+                throw new \RuntimeException(sprintf(
+                    'Timed out waiting %.2fs for session "%s".',
+                    $this->lockTimeout,
+                    $this->sessionId
+                ));
+            }
+            \Yii2S\Swoole\Coroutine\Sleep::sleep(0.02);
+        }
+    }
+
+    private function releaseLock(): void
+    {
+        $this->releaseToken($this->lockedId, $this->lockToken);
+        $this->lockToken = null;
+        $this->lockedId = null;
+    }
+
+    private function releaseToken(?string $sessionId, ?string $token): void
+    {
+        if ($sessionId === null || $token === null) {
+            return;
+        }
+        $this->redis->executeCommand('EVAL', [
+            self::RELEASE_LOCK,
+            [$this->lockKey($sessionId), $token],
+            1,
+        ]);
+    }
+
+    private function lockKey(string $sessionId): string
+    {
+        return $this->keyPrefix . 'lock:' . $sessionId;
+    }
+
+    /**
      * Resolves the session id for this request. An explicitly assigned id
      * (setId()) wins over the client cookie, matching yii\web\Session
      * semantics (session_id($this->getId())).
@@ -403,7 +502,9 @@ class CoroutineSession extends Session
             return;
         }
 
-        $decoded = $exists ? @unserialize($raw) : null;
+        // Session payloads are arrays of scalars. Disabling classes matches
+        // the cookie parser: a forged Redis value must not instantiate objects.
+        $decoded = $exists ? @unserialize($raw, ['allowed_classes' => false]) : null;
         $this->data = is_array($decoded) ? $decoded : [];
     }
 

@@ -10,12 +10,18 @@ declare(strict_types=1);
 
 namespace Yii2S\Swoole\Scheduling;
 
+use Yii2S\Swoole\Redis\CoroutineRedisConnection;
+
 /**
  * Dispatches [[Crontab]] tasks.
  *
- * Call [[tick()]] once per second (e.g. from the server's `workerStart`
- * coroutine) and it runs every due task. [[run()]] provides the blocking
- * coroutine loop for standalone use.
+ * Call [[tick()]] once per second from each worker. Only one worker in the
+ * process runs the due tasks (worker id 0, or the only process when there is
+ * no worker). Pass a Redis connection to also elect a single winner across
+ * server instances: the due slot is taken with `SET NX`.
+ *
+ * A task that is still running is not started again by this dispatcher.
+ * [[run()]] provides the blocking coroutine loop for standalone use.
  */
 class CrontabDispatcher
 {
@@ -23,6 +29,67 @@ class CrontabDispatcher
      * @var Crontab[]
      */
     private array $crontabs = [];
+
+    /**
+     * Task names whose callback has not returned. Checked so a slow task is
+     * not started again on the next tick of this same dispatcher.
+     *
+     * @var array<string, true>
+     */
+    private array $running = [];
+
+    private ?CoroutineRedisConnection $redis;
+
+    private string $lockPrefix;
+
+    /**
+     * Seconds the Redis lock is held if the worker dies mid-task. While the
+     * callback is running the lock stays, so another instance cannot start
+     * the same task on the next second. Released when the callback returns.
+     */
+    public int $lockSeconds = 60;
+
+    /**
+     * @var array<string, string> task name => lock token
+     */
+    private array $lockTokens = [];
+
+    private const RELEASE_LOCK = <<<'LUA'
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+end
+return 0
+LUA;
+
+    /**
+     * Worker id recorded by the HTTP server on worker start. Null outside a
+     * worker, where this process is the only candidate.
+     */
+    private static ?int $workerId = null;
+
+    public static function setWorkerId(?int $workerId): void
+    {
+        self::$workerId = $workerId;
+    }
+
+    /**
+     * @var callable(Crontab, int): bool|null replaces the built-in worker-id /
+     * Redis election. Used by tests and by an application that already has its own lock.
+     */
+    private $leader;
+
+    /**
+     * @param callable(Crontab, int): bool|null $leader
+     */
+    public function __construct(
+        ?CoroutineRedisConnection $redis = null,
+        string $lockPrefix = 'yii2s:crontab:',
+        ?callable $leader = null,
+    ) {
+        $this->redis = $redis;
+        $this->lockPrefix = $lockPrefix;
+        $this->leader = $leader;
+    }
 
     public function add(Crontab $crontab): self
     {
@@ -49,10 +116,75 @@ class CrontabDispatcher
         $now ??= time();
 
         foreach ($this->crontabs as $crontab) {
-            if ($this->isDue($crontab, $now)) {
+            if (!$this->isDue($crontab, $now) || !$this->claim($crontab, $now)) {
+                continue;
+            }
+
+            $name = $crontab->getName();
+            $this->running[$name] = true;
+            try {
                 ($crontab->getCallback())();
+            } finally {
+                unset($this->running[$name]);
+                $this->releaseRedis($name);
             }
         }
+    }
+
+    /**
+     * True when this process should execute the due task. A task that has not
+     * returned yet is never claimed again here.
+     */
+    private function claim(Crontab $crontab, int $now): bool
+    {
+        if (isset($this->running[$crontab->getName()])) {
+            return false;
+        }
+        if ($this->leader !== null) {
+            return (bool) ($this->leader)($crontab, $now);
+        }
+        if (!$this->isLocalLeader()) {
+            return false;
+        }
+        if ($this->redis === null) {
+            return true;
+        }
+
+        $token = bin2hex(random_bytes(8));
+        $result = $this->redis->executeCommand('SET', [
+            $this->lockPrefix . $crontab->getName(),
+            $token,
+            ['NX', 'EX' => max(1, $this->lockSeconds)],
+        ]);
+        if ($result !== true && $result !== 'OK') {
+            return false;
+        }
+        $this->lockTokens[$crontab->getName()] = $token;
+
+        return true;
+    }
+
+    private function releaseRedis(string $name): void
+    {
+        $token = $this->lockTokens[$name] ?? null;
+        unset($this->lockTokens[$name]);
+        if ($token === null || $this->redis === null) {
+            return;
+        }
+        $this->redis->executeCommand('EVAL', [
+            self::RELEASE_LOCK,
+            [$this->lockPrefix . $name, $token],
+            1,
+        ]);
+    }
+
+    /**
+     * Worker 0 runs the tasks. Outside a worker (a dedicated process, or the
+     * test runner) there is only one candidate, so it runs them.
+     */
+    private function isLocalLeader(): bool
+    {
+        return self::$workerId === null || self::$workerId === 0;
     }
 
     /**

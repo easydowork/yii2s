@@ -107,9 +107,30 @@ class RequestMetricsTest extends ServerTestCase
                 'db' => ['size' => 1, 'idle' => 1, 'active' => 0, 'waiting' => 0, 'total_created' => 1, 'total_borrowed' => 1, 'total_timeouts' => 0, 'total_discarded' => 0],
             ]);
 
+            $published = new RequestMetrics();
+            $published->beginRequest();
+            $published->record(0.01, 200, 'GET');
+            $aggregator->publish($published, [
+                'db' => ['size' => 1, 'idle' => 1, 'active' => 0, 'waiting' => 0, 'total_created' => 1, 'total_borrowed' => 1, 'total_timeouts' => 0, 'total_discarded' => 0],
+            ]);
+            $reader = new RequestMetrics();
+            $seen = $aggregator->renderPublished($reader);
+            $this->assertStringContainsString(
+                'yii2s_http_requests_total{method="GET",status="200"} 1',
+                $seen,
+                'a worker that never served /metrics is still visible after publish()'
+            );
+
             $this->assertStringContainsString('yii2s_http_requests_total{method="GET",status="200"} 1', $out);
             $this->assertStringContainsString('yii2s_process_memory_bytes{worker="', $out);
             $this->assertStringContainsString('yii2s_pool_size{pool="db"} 1', $out);
+
+            $stale = 'yii2s:test:metrics:worker:999999';
+            $redis->sAdd('yii2s:test:metrics:workers', $stale);
+            $aggregator->render($metrics, []);
+            $members = $redis->sMembers('yii2s:test:metrics:workers');
+            $this->assertIsArray($members);
+            $this->assertNotContains($stale, $members);
         });
     }
 }

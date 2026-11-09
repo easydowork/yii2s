@@ -239,7 +239,7 @@ class SwooleController extends Controller
             $isolated
                 ? sprintf('application class "%s" isolates request-scoped components per coroutine', $appClass)
                 : sprintf(
-                    'application class "%s" must extend %s, otherwise request/response/session/user are shared between concurrent requests',
+                    'application class "%s" must extend %s, otherwise request/response/session/user/view/errorHandler are shared between concurrent requests',
                     $appClass,
                     \Yii2S\Swoole\Runtime\CoroutineApplication::class
                 )

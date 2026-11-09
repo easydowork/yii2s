@@ -42,6 +42,12 @@ class CircuitBreaker
 
     private string $state = self::STATE_CLOSED;
 
+    /**
+     * True while the single half-open probe is inside its operation.
+     * Other callers fail fast until that probe returns.
+     */
+    private bool $probeInFlight = false;
+
     public function __construct(int $failureThreshold = 5, float $cooldownSeconds = 30.0)
     {
         $this->failureThreshold = max(1, $failureThreshold);
@@ -66,17 +72,14 @@ class CircuitBreaker
      */
     public function call(callable $operation, ?callable $fallback = null, ?callable $countsAsFailure = null): mixed
     {
-        if ($this->state === self::STATE_OPEN) {
-            if (microtime(true) - $this->openedAt < $this->cooldownSeconds) {
-                return $this->failFast($fallback, null);
-            }
-            // Cooldown elapsed: allow a single probe.
-            $this->state = self::STATE_HALF_OPEN;
+        if (!$this->beginCall()) {
+            return $this->failFast($fallback, null);
         }
 
         try {
             $result = $operation();
         } catch (\Throwable $e) {
+            $this->endCall();
             if ($countsAsFailure === null || $countsAsFailure($e)) {
                 $this->recordFailure();
             }
@@ -84,9 +87,42 @@ class CircuitBreaker
             return $fallback !== null ? $fallback($e) : throw $e;
         }
 
+        $this->endCall();
         $this->recordSuccess();
 
         return $result;
+    }
+
+    /**
+     * Decides whether this caller may run the operation. The transition into
+     * the half-open probe happens before the operation yields, so a second
+     * coroutine observes [[$probeInFlight]] and does not start another probe.
+     */
+    private function beginCall(): bool
+    {
+        if ($this->state === self::STATE_OPEN) {
+            if (microtime(true) - $this->openedAt < $this->cooldownSeconds) {
+                return false;
+            }
+            $this->state = self::STATE_HALF_OPEN;
+            $this->probeInFlight = true;
+
+            return true;
+        }
+
+        if ($this->state === self::STATE_HALF_OPEN) {
+            if ($this->probeInFlight) {
+                return false;
+            }
+            $this->probeInFlight = true;
+        }
+
+        return true;
+    }
+
+    private function endCall(): void
+    {
+        $this->probeInFlight = false;
     }
 
     public function getState(): string

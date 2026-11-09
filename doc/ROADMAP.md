@@ -30,7 +30,7 @@
 |---|---|---|
 | 设计 | 8/10 | 状态隔离做在调度层、Yii2 组件尽量不改，这条路线选对了 |
 | 正确性（修复后） | 8.5/10 | 并发串号/登录态/上传/keeper 死锁等 P0 已根治，双平台真实 socket 用例钉死 |
-| 测试 | 8.5/10 | 双平台 211/852 全绿 + blog smoke 52 项 Linux 全过 + 24h soak 9467 万请求 0 错误 |
+| 测试 | 8.5/10 | 当前套件 238 tests / 949 assertions。文中 211/852、219/872、224/890 是更早一次运行的记录。blog smoke 52 项与 24h soak 见 §5 |
 | 性能 | 8.5/10 | Linux 12 核实测：纯框架 48551 QPS、`/demo/redis` 29126 QPS、0 错误 |
 | 可运维性 | 7/10 | 已有 `/__pool` + `/metrics` + `swoole/status`；停机死锁噪音已消除；缺 Prometheus 告警接入 |
 | 发布成熟度 | 4/10 | `v1.0.0` 已发布（2026-11-08 重建至 `cd2b0ff`，含 keeper 死锁修复）；缺 Packagist / 升级指南 |
@@ -41,10 +41,10 @@
 
 | # | 不足 | 严重度 | 影响 |
 |---|---|---|---|
-| A1 | 可观测性缺失 | **P0** | 内存是否缓慢增长、池是否被打满，是上生产底线，现在无法证明 |
+| A1 | ~~可观测性缺失~~ | 已解决 | `/metrics`、`/__pool`、`swoole/status` 已落地。每个 worker 定时发布快照，抓取不再只看见接到请求的那一个 |
 | A2 | 多实例（多 master）运维心智 | ~~P1~~ 已定案 | 2026-11-08 定案：移除 SO_REUSEPORT 同端口形态，唯一形态为**多端口 + nginx upstream**（每实例独立端口与 pid 文件，supervisor 托管）；部署演练见 §5.2 P0 |
-| A3 | 错误/降级策略缺位 | **P0** | Redis/MySQL 宕机直接 500 连击，无降级/熔断 |
-| A4 | 连接池缺少长期健康机制 | **P0** | 只有 borrow 时可选校验，无 min-idle 水位、max-lifetime、空闲保活 |
+| A3 | ~~错误/降级策略缺位~~ | 已解决 | 熔断器在半开时只放行一次探测；DB 断线 discard |
+| A4 | ~~连接池缺少长期健康机制~~ | 已解决 | min-idle、max-lifetime、空闲保活、keeper 定时器 |
 | A5 | ~~部分功能「写了没接上」~~ | ~~过程性~~ | 已解决：`prewarm` 已接上 `workerStart`，`forgetComponent` 有回归护栏 |
 | A6 | 测试盲区 | P1 | 24h soak 与压测基线已有（2026-11-09）；剩「重启后 p99」这类发布断言（归入 §5.2 P1 调优/演练） |
 | A7 | 工程纪律小毛病 | P2 | 测试计数靠手工 sed、提交信息与文件曾不一致 |
@@ -81,7 +81,7 @@
 | **`renderExceptionResponse` 加固** | ✅ | 错误动作再抛异常时路径更稳 | 兜底 `end()` 包 try/catch，响应已部分写入也不会再抛 |
 | **发布** | 🚧 | `v1.0.0` 已打 tag（2026-11-08 重建至 `cd2b0ff`）；剩 Packagist + 版本冻结 + 升级指南 | 可 `composer require` 到固定版本 |
 | **soak.php 多实例口径** | ⬜ | `pool snapshot` 的 first→last 差值在 upstream 多实例场景跨实例不可比（演练中出现负数差值） | 采样携带实例标识（host:port），差值按同一实例计算；多实例时输出逐实例快照 |
-| **协程 session 的 beforeAction 时机** | ⬜ | stock `yii\filters\RateLimiter` 在 beforeAction 阶段 identity/session 未就绪（实测：filter 内 `session_id=''`、identity=null，同一请求的 action 里 User#1 正常）→ filter 对匿名/登录一律跳过限流；`User` 已实现 `RateLimitInterface`（allowance 存 Redis）备用，blog demo 暂用 IP 级 Resilience\RateLimiter（实测工作） | 深挖 CoroutineSession 的 open/identity 解析时机（行为改变需谨慎，涉及 user 组件解析链），适配后切换 blog demo 为内置 filter（含 X-Rate-Limit-* 头） |
+| **协程 session 的 beforeAction 时机** | ✅ | `getIdentity(false)` 自己不打开会话。请求进入控制器前，若已带 session id，`CoroutineApplication::restoreIdentity()` 先恢复身份，官方 `RateLimiter` 因此看得到登录用户。匿名接口仍用 IP 限流（官方过滤器会跳过 guest） | `UserSessionFlowTest::testIdentityIsRestoredBeforeFiltersAsk` |
 
 ### 过程中新发现并已修复
 
@@ -98,7 +98,7 @@
 
 | 项 | 说明 |
 |---|---|
-| **会话 last-write-wins** | Redis 会话无锁，同 session 并发写会互相覆盖（flash/身份变更可能丢）；需要更强隔离时用「有锁会话」或业务侧串行化 |
+| **会话锁** | 同一个 session id 从 `open()` 到 `close()` 持有 Redis 锁，请求结束由 `RequestStateManager` 关闭。锁超时默认 5 秒，进程崩溃后锁自行过期 |
 
 ### 运维工具增强（对标 Hyperf，2026-11-04 立项）
 
@@ -121,8 +121,8 @@
 ### 第一阶段：长期可信度（本阶段）
 **目标**：把「内存/连接是否泄漏、故障是否能自愈」变成可证明的事。
 
-- [x] 观测指标端点（已完成，未提交）
-- [x] 长跑检漏脚本（已完成，未提交）
+- [x] 观测指标端点
+- [x] 长跑检漏脚本
 - [x] 连接池 min-idle / max-lifetime / 空闲保活
 - [x] 降级/熔断策略 + 故障注入测试
 - [x] 4h soak 实跑（2.02 亿请求 0 错误、RSS 平台、池零泄漏，日志 `/tmp/yii2s-soak-4h.log`）
@@ -255,7 +255,7 @@
 | 配置 | 默认 | 生产建议 | 为什么不默认 |
 |---|---|---|---|
 | `max_request` | 0（不重启） | 灰度泄漏兜底，如 `10000` | 手册定位「编码不规范泄漏的**临时**方案，应修复根因」；worker 重启重建应用+连接池；是否开启结合 24h soak / 灰度 RSS 曲线决定，配合 `reload_async` 在途不丢（PROCESS 模式不断连） |
-| `max_concurrency` | 100000 | 与 `poolMaxActive × worker` 对齐 | v4.8.2+，HTTP1/2 **并发请求**上限，超限 503；默认改了会让突增流量被拒，应由生产显式设 |
+| `max_concurrency` | 手册未给出（v5.0.0 起的 Server 键；v4.8.2 改的是只能 `Co::set()` 的协程项） | 与 `poolMaxActive × worker` 对齐 | 这份 setting.md 没有该键，也没有「默认 100000、超限 503」。100000 和 HTTP 503 是 `max_coroutine` 的说明。生产要设就显式写，不要沿用那组数字 |
 | `max_coroutine` | 100000 | 与并发模型对齐 | 每 worker **协程**上限（两者是并列的不同键），超限同样 503；与 `max_concurrency` 一起构成过载保护 |
 | `max_conn` / `max_connection` | **`ulimit -n`** | 生产调大 `nofile` 并显式声明 | 默认跟随系统 ulimit——生产文档要点：`nofile` 不调则连接上限受限 |
 | `open_tcp_nodelay` | false | API 场景 `true` | nginx 前置内网收益有限，改 TCP 行为应显式 |
@@ -296,60 +296,7 @@ ZTS 多线程模式相关（`single_thread`/`bootstrap`/`init_arguments`，我�
       （hook_flags 条目显著标注行为变更）
 - [ ] soak.php 多实例口径（§3 P2，未做）
 
-### 6.1 配置体系规范（新增配置的决策树）
-
-三条路径（现状已隐式存在，本次显式化为规范）：
-
-1. **`settings` 数组**：Swoole 原生键 100% 透传，用户任意键；`applySettings()`
-   用 `+=` 只补默认，**用户键永远胜出**（优先级契约，不变）：
-   `用户 settings 键 > applySettings() 默认 > Swoole 自身默认`。
-2. **`applySettings()` 默认**：只放「有证据的有主见默认」，每个默认块注释
-   三要素——**为什么（含实测证据）→ 行为说明 → 如何覆盖**；按主题分区：
-   协议解析 → 协程 hook → 请求体/连接上限 → 优雅生命周期 → 日志。
-3. **语义属性**：仅限「有派生逻辑/联动/防御性修正」（如 `workerNum` 0→核数、
-   `gracefulTimeout` 联动 `reload_async`、`logFile` 默认路径/false 哨兵）或
-   非 settings 域的项目行为（`watch`、`prewarm`、`documentRoot`）。**属性是
-   特例不是常态**——纯直通的 Swoole 键不加属性，类体积停止增长。
-
-### 6.2 A 类：进默认值（5 项，逐项带注释）
-
-| 配置 | Swoole 默认 | 拟定默认 | 理由（含证据） |
-|---|---|---|---|
-| `hook_flags` | 隐式 ALL | 显式 `SWOOLE_HOOK_ALL` | 实测 PDO 协程化已生效；显式声明防 Swoole 未来改默认，自文档化、零行为变化 |
-| `package_max_length` | 2MB（实测 3MB→413） | 显式 `2 * 1024 * 1024` | 不改行为；把「与 nginx `client_max_body_size` 对齐」从口头变成配置项（关联 §5.2 P2 安全清单） |
-| `backlog` | 128 | `2048` | 突发连接时 SYN 队列溢出丢连接（压测 50+ 并发新建场景）；内核 `somaxconn` 取 min，放大无害 |
-| `log_date_with_microtime` | false | `true` | 多 worker 日志交错时排查时序必需（事件归因到毫秒） |
-| `display_errors` | 开 | `false` | PHP notice/warning 不泄露到响应/stdout；错误仍进 `log_file`（SWOOLE_LOG_ERROR）+ Yii 日志，消除双写 |
-
-### 6.3 B 类：不加属性，文档「生产推荐 settings 清单」（6 项）
-
-| 配置 | 默认 | 生产建议 | 为什么不默认 |
-|---|---|---|---|
-| `max_request` | 0（不重启） | 灰度泄漏兜底，如 `10000` | worker 重启重建应用+连接池；是否开启应结合 24h soak / 灰度 RSS 曲线决定，配合 `reload_async` 在途不丢 |
-| `max_concurrency` | 100000 | 与 `poolMaxActive × worker` 对齐 | 超限 503；默认改了会让突增流量被拒，应由生产显式设 |
-| `open_tcp_nodelay` | false | API 场景 `true` | nginx 前置内网收益有限，改 TCP 行为应显式 |
-| `heartbeat_check_time` | 0 | `300` 左右 | 清理半开连接；会掐掉长 idle 的 keep-alive 连接（重连成本），默认关是对的 |
-| `open_cpu_affinity` | false | 独立多核机可开 | 容器/k8s cpuset 场景绑核反而出问题 |
-| `user`/`group` | — | root 启动时降权 | supervisor 以非 root 启动则不需要；部署职责 |
-| `dispatch_mode` | 2（fd 固定，有状态模式） | 保持默认；负载不均时改 `3`（空闲优先，官方建议无状态 Server 用 1/3） | **实测（hook ALL 下 20 并发 PDO）：2 与 3 的 QPS/延迟完全一致（92/92 qps）**——无收益不默认改；生产若 nginx 长连接数少于 worker 数导致负载/池压力不均，再改 3 |
-
-### 6.4 C 类：不默认（职责在 nginx / 不适用）
-
-`enable_static_handler`（实测被 Swoole 忽略，项目 PHP 层静态服务）、
-`ssl_cert_file`/`ssl_key_file`/`open_http2_protocol`（TLS/h2 由 nginx 终结）、
-`http_compression`（nginx gzip/brotli，swoole 层开是重复压缩）、
-`daemonize`/`pid_file`（项目自管 `PidFile`，避免双 pid 语义）、
-`task_worker_num`（无 task 模型，`queue/serve` 独立进程）、`dispatch_mode`（默认 2 即可）。
-
-### 6.5 实施清单（等 24h soak 验收后执行）
-
-- [ ] A 类 5 项进 `applySettings()`，按 §6.1 分区注释规范逐块写注释
-- [ ] `HttpServerLogSettingsTest` 更名 `HttpServerDefaultsTest`，作为所有默认
-      settings 断言的家，用例从 4 个扩到 ~8 个
-- [ ] B 类「生产推荐 settings 清单」写入 README 显式配置示例 + DEVELOPMENT 部署章节
-- [ ] `display_errors=false` 行为变化复核：全量 e2e + blog smoke 无断言依赖
-      （错误路径均走 Yii errorHandler，预期无影响）
-- [ ] CHANGELOG Added 记录
+同一节早先还有一份草稿，把 `hook_flags` 写成「隐式 ALL」、把键名写成 `log_date_with_microtime`，实施清单也还是未勾。那份已删，避免和上面的定稿相反。
 
 ---
 
@@ -458,7 +405,7 @@ interface WebsocketHandlerInterface
     /** 握手：true|array 接受升级（array 作为该连接的元数据，由实现方自存）；
      *  false 或抛异常即拒绝升级（拒绝响应的状态码/内容由实现方决定，例如 401）。
      *  鉴权策略完全由实现方决定：session / token / JWT / 无——不内置。 */
-    public function handshake(Swoole\Http\Request $request): bool|array;
+    public function handshake(Swoole\Http\Request $request): bool;
 
     public function open(Swoole\WebSocket\Server $server, Swoole\Http\Request $request, int $fd): void;
 

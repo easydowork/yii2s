@@ -130,13 +130,11 @@ class SiteController extends Controller
      * Security demo: IP-based rate limiting (10 req / 10s per client IP) via
      * the yii2s Resilience\RateLimiter (Redis fixed window, coroutine pool).
      *
-     * NOTE on the stock `yii\filters\RateLimiter`: it skips limiting when the
-     * identity is null, and in a coroutine environment the identity is NOT
-     * yet resolvable at the beforeAction stage (session/cookie read returns
-     * empty there - verified: session_id='' in the filter vs User#1 in the
-     * action). Wiring it up needs the coroutine session identity timing to be
-     * solved first (see ROADMAP). Until then, an IP-keyed limiter covers the
-     * anonymous-API case, which the stock filter does not address anyway.
+     * The stock `yii\filters\RateLimiter` calls `getIdentity(false)`, which
+     * does not open the session itself. The dispatcher restores the identity
+     * before filters run when the request already has a session id, so that
+     * filter sees the logged-in user. This endpoint stays IP-keyed because
+     * it is anonymous: the stock filter skips guests.
      */
     public function actionApi(): void
     {

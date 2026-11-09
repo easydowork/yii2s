@@ -218,6 +218,11 @@ class CoroutineDbConnectionTest extends DatabaseTestCase
             $this->assertSame(['username' => 'root'], $connection->masterConfig);
             $this->assertSame(['username' => 'root'], $connection->slaveConfig);
             $this->assertTrue($connection->enableSlaves);
+            $this->assertSame(
+                10,
+                $db->getPool()->getMetrics()['max_active'],
+                'slaves open a second PDO, so the pool holds half of poolMaxActive objects'
+            );
 
             $db->release();
         });

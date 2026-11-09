@@ -100,4 +100,36 @@ class CircuitBreakerTest extends TestCase
         $this->assertSame(CircuitBreaker::STATE_CLOSED, $breaker->getState());
         $this->assertSame(0, $breaker->getConsecutiveFailures());
     }
+
+    public function testHalfOpenAllowsOnlyOneProbe(): void
+    {
+        $this->runInCoroutine(function (): void {
+            $breaker = new CircuitBreaker(1, 0.01);
+            try {
+                $breaker->call(static fn () => throw new \RuntimeException('down'));
+            } catch (\RuntimeException) {
+            }
+            \Swoole\Coroutine::sleep(0.02);
+
+            $calls = 0;
+            $channel = new \Swoole\Coroutine\Channel(2);
+            for ($i = 0; $i < 2; $i++) {
+                \Swoole\Coroutine::create(function () use ($breaker, &$calls, $channel): void {
+                    $result = $breaker->call(function () use (&$calls): string {
+                        $calls++;
+                        \Swoole\Coroutine::sleep(0.05);
+
+                        return 'probed';
+                    }, static fn (): string => 'blocked');
+                    $channel->push($result);
+                });
+            }
+
+            $results = [$channel->pop(1), $channel->pop(1)];
+            sort($results);
+            $this->assertSame(['blocked', 'probed'], $results);
+            $this->assertSame(1, $calls);
+            $this->assertSame(CircuitBreaker::STATE_CLOSED, $breaker->getState());
+        });
+    }
 }

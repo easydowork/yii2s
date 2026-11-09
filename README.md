@@ -1,8 +1,9 @@
 # Yii2S Swoole — Yii2 协程加速器
 
 让 Yii2 应用运行在 **Swoole 6 常驻内存协程 HTTP 服务器**上：数据库/Redis 连接池化复用、
-每请求状态隔离、优雅停机、守护化命令、内置压测器。业务代码基本不用改——换掉配置里的
-组件类即可。
+`request` / `response` / `session` / `user` 按协程隔离、优雅停机、守护化命令、内置压测器。
+控制器可以继续用 Yii2 的写法。会话、缓存、队列、上传和 pretty URL 要按文末的约束配置，
+不是把组件类换掉就结束。
 
 ```json
 {"app":"yii2s-example","engine":"swoole-coroutine","php":"8.4.14","swoole":"6.2.0","pid":757,"cid":5}
@@ -12,12 +13,12 @@
 
 | 领域 | 特性 |
 |---|---|
-| 核心 | 多进程 `Swoole\Http\Server`（`worker_num = CPU 核数`）、协程连接池、每请求状态隔离、优雅停机/热重载 |
+| 核心 | 多进程 `Swoole\Http\Server`（`worker_num = CPU 核数`）、协程连接池、request/response/session/user/view/errorHandler 按协程隔离、优雅停机/热重载 |
 | 性能 | 路由缓存、单飞锁（thundering herd 抑制）、raw 路由极简通道、内置压测器 |
 | 观测 | `/metrics`（Prometheus：RED + 池 + 进程 + 跨 worker 聚合 + 系统负载）、`/__pool`、`swoole/status` 运行时面板 |
 | 韧性 | 熔断器、限流、重试、连接池健康机制（min-idle / max-lifetime / 空闲保活）、DB 断线自愈 |
 | 运维 | `swoole/start|stop|reload|check|status|routes`、`queue/serve`、长跑检漏脚本、watch 热重载 |
-| 调度 | 秒级定时任务（crontab） |
+| 调度 | 秒级定时任务（worker 0；多实例用 Redis 锁盖住整次执行） |
 
 基准（macOS + swoole-cli，12 worker，keep-alive，100 并发 5s）：纯框架 **24832 QPS**（p50 2.94ms）/
 带 DB 查询 **10294 QPS** / 带 Redis **7766 QPS**，连接池零超时零泄漏，详见
@@ -148,8 +149,8 @@ flowchart LR
     PR -.->|抓取 /metrics| SWN
 ```
 
-设计原则：**状态隔离做在调度层，上层 Yii2 组件尽量不改**——这也是 CSRF、Basic Auth、
-事务、MULTI 无需适配就能用的原因。完整的组件替换对照表和踩坑记录见
+设计原则：请求态（`request`、`response`、`session`、`user`、`view`、`errorHandler`）在调度层按协程隔离，
+DB/Redis 连接按协程粘住。CSRF、Basic Auth、事务、MULTI 不用改调用方式。组件替换对照和踩坑记录见
 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md)。
 
 ---
@@ -158,7 +159,8 @@ flowchart LR
 
 ### 方式一：一行接入（推荐）
 
-现有 Yii2 应用只需在 `bootstrap` 里加一条——**其余零改动**：
+在 `bootstrap` 里加一条，stock 的 `request` / `response` / `db` / `redis` 会换成协程实现，原有参数保留。
+这不是业务零改动：还要满足文末的已知限制。`session`、`cache`、`queue` 没有可自动替换的 stock 类，必须写成协程类。
 
 ```php
 // config/web.php
@@ -262,7 +264,7 @@ php yii swoole/start        # 就这么跑起来了
 ```php
 'settings' => [
     'max_request'          => 10000, // 泄漏兜底：worker 每 N 请求优雅重启（灰度期结合 RSS 曲线决定）
-    'max_concurrency'      => 200,   // HTTP 并发请求上限（v4.8.2+，超限 503）
+    'max_concurrency'      => 200,   // Server 并发请求上限（v5.0.0+ 才有这个键；超限行为以当前 Swoole 为准）
     'max_coroutine'        => 200,   // 每 worker 协程上限（与并发模型对齐）
     'open_tcp_nodelay'     => true,  // API 小响应降延迟
     'heartbeat_check_time' => 300,   // 清理半开连接
@@ -321,7 +323,8 @@ final class ChatHandler implements \Yii2S\Swoole\Websocket\WebsocketHandlerInter
     'class' => \Yii2S\Swoole\Queue\CoroutineRedisQueue::class,
     'redis' => 'redis',
     'channel' => 'default',
-    'ttr' => 60,                  // 失败任务重试延迟
+    'ttr' => 60,                  // handler 抛错后的重试延迟
+    'visibilityTimeout' => 60,    // 执行中的租约；超时未 ack 视为崩溃并计一次失败
     'maxAttempts' => 3,           // 超过则进死信列表
     'handler' => function (array $payload): void {
         // 处理任务
@@ -329,9 +332,13 @@ final class ChatHandler implements \Yii2S\Swoole\Websocket\WebsocketHandlerInter
 ],
 ```
 
-`request/response/session/user` 由框架每请求自动重建，原版 `yii\web\User`、
-`yii\filters\auth\HttpBasicAuth` 等直接可用。Redis 的 MULTI/PIPELINE、
+`request` / `response` / `session` / `user` / `view` / `errorHandler` 由框架在每个协程里重建，
+原版 `yii\web\User`、`yii\filters\auth\HttpBasicAuth` 等直接可用。Redis 的 MULTI/PIPELINE、
 DB 的事务也都原生支持（连接在协程内粘性借用）。
+
+队列取出任务后放进 reserved 集合，处理成功才删除。`handler` 抛错会按 `ttr` 延迟重试，
+超过 `maxAttempts` 进死信。进程在 `handler` 中途退出时，任务留在 reserved 里，
+超过 `visibilityTimeout` 后由下一次 `reserve()` 按失败重投。处理时间不要超过这个租约。
 
 ## 极简接口快速通道（raw 路由）
 
@@ -458,9 +465,13 @@ $dispatcher = new CrontabDispatcher();
 $dispatcher->add(new Crontab('清理过期会话', '@every 5m', fn () => Session::gc()));
 $dispatcher->add(new Crontab('每日汇总', '0 2 * * *', fn () => Stats::aggregateDaily()));
 
-// 在 workerStart 的协程里每秒 tick 一次（或在独立协程里 run()）
+// 每个 worker 都可以 tick。没有 Redis 时只有 worker 0 会执行。
+// 传入 Redis 后，同一任务名一把锁，回调返回才释放；进程崩溃则等 lockSeconds。
 \Swoole\Coroutine::create(fn () => $dispatcher->run());
 ```
+
+`@every` 用当前时间对间隔取模，对齐的是时钟，不是“从进程启动起每隔 N 秒”。
+`beforeStart` 在 master 调用 `server->start()` 之前触发，挂在那里的协程不会进入 worker。
 
 ## 生产部署（Linux）
 
@@ -490,12 +501,13 @@ stopwaitsecs=25                ; 必须大于 gracefulTimeout(10s)，留出排�
 - 不要在常驻进程中使用 `$_SESSION`/`header()`/`setcookie()` 等超全局/过程式 API，
   一律走 `Yii::$app->request/response/session`
 - 自定义 `Application` 类必须继承 `Yii2S\Swoole\Runtime\CoroutineApplication`，否则
-  request/response/session/user 会在并发请求间共享
+  request/response/session/user/view/errorHandler 会在并发请求间共享
 - 子协程（`Coroutine::create()`）**不继承**协程上下文：在子协程里访问
-  `Yii::$app->request/session/user` 会得到该请求之外的空实例。并发子任务请先在
+  `Yii::$app->request/session/user/view` 会得到该请求之外的实例。并发子任务请先在
   父协程取出所需数据再传入（DB/Redis 连接池本身不受影响）
-- 上传用 `Yii2S\Swoole\Runtime\CoroutineUploadedFile`（官方 `yii\web\UploadedFile` 的
-  `saveAs()` 在 Swoole 下会失败，且读进程级 `$_FILES` 并发串文件）：
+- 协程请求不把上传写进进程级 `$_FILES`，官方 `UploadedFile` 在并发下读不到文件，也不会读到别人的。
+  读和落盘都用 `Yii2S\Swoole\Runtime\CoroutineUploadedFile`。官方 `saveAs()` 还依赖
+  `move_uploaded_file()`，Swoole 写入的临时文件不在 PHP 上传登记表里：
 
   ```php
   use Yii2S\Swoole\Runtime\CoroutineUploadedFile as UploadedFile;
@@ -503,10 +515,13 @@ stopwaitsecs=25                ; 必须大于 gracefulTimeout(10s)，留出排�
   $file?->saveAs('@app/web/uploads/' . $file->name);
   ```
 
+- `CoroutineRedisQueue` 不实现 `yii\queue\Queue`。执行中的任务超过 `visibilityTimeout` 会按失败重投，处理逻辑需要能重复执行
+- `CrontabDispatcher` 在本机只让 worker 0 执行。多实例传入 Redis 后，同一任务名持有一把锁，回调返回才释放，默认 60 秒后过期。`@every` 仍按时钟取模
+
 ## 开发与测试
 
 目标平台 Linux；测试可在 Linux 与 macOS（swoole-cli）上完整运行，
-全量 **211 tests / 852 assertions**（2 skipped）全绿。
+全量 **238 tests / 949 assertions** 全绿。
 
 ```bash
 composer test    # PHPUnit（需要本地 MySQL/Redis）

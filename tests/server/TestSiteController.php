@@ -47,7 +47,7 @@ class TestSiteController extends Controller
         // (UploadedFile consumes CoroutineRequest::getFileParams()).
         $report = static function (string $fieldName): array {
             $reported = [];
-            foreach (\yii\web\UploadedFile::getInstancesByName($fieldName) as $file) {
+            foreach (\Yii2S\Swoole\Runtime\CoroutineUploadedFile::getInstancesByName($fieldName) as $file) {
                 $reported[] = [
                     'name' => $file->name,
                     'size' => $file->size,

@@ -64,11 +64,11 @@ pid 文件读写与进程存活判断。
 
 | 类 | 职责 |
 |---|---|
-| `CoroutineApplication` | 每协程隔离 request/response/session/user 的应用类 |
-| `CoroutineRequest` | 协程安全请求（从 Swoole request 填充，不碰 `$_GET`/`$_POST`/`$_FILES`） |
+| `CoroutineApplication` | 按协程创建 request/response/session/user/view/errorHandler |
+| `CoroutineRequest` | 从 Swoole request 读 query/body/header/cookie。协程内不写进程级 `$_FILES` |
 | `CoroutineResponse` | 内存中完成格式化的响应 |
 | `CoroutineUploadedFile` | 协程安全上传（`saveAs` 支持 Swoole 临时文件） |
-| `CoroutineUrlManager` | 路由解析缓存（method+path 记忆化，规则多时省 CPU） |
+| `CoroutineUrlManager` | 路由解析缓存（键是 method + host + pathInfo） |
 | `RequestStateManager` | 每请求重建请求作用域组件 + 归还池连接 + sweep + 日志 flush |
 | `SwooleResponseSender` | 把 Yii response 写到 Swoole response |
 
@@ -122,8 +122,10 @@ Redis 会话（无 `$_SESSION`），完整 flash / 严格模式 / 会话固定�
 
 ### `CoroutineRedisQueue`
 
-Redis 队列（`push` / `reserve` / 失败重试 / 死信）。配置：`redis`、`channel`、
-`ttr`、`maxAttempts`、`handler`。
+Redis 队列（`push` / `reserve` / `ack` / 失败重试 / 死信）。`reserve()` 把任务移到 reserved 集合，
+成功由 `ack()` 删除，失败按 `ttr` 重试或进死信。超过 `visibilityTimeout` 仍未确认的任务，
+下一次 `reserve()` 按失败重投。不实现 `yii\queue\Queue`。
+配置：`redis`、`channel`、`ttr`、`visibilityTimeout`、`maxAttempts`、`handler`。
 
 ---
 
@@ -143,7 +145,7 @@ Redis 队列（`push` / `reserve` / 失败重试 / 死信）。配置：`redis`�
 | 类 | 作用 |
 |---|---|
 | `Crontab` | 定时任务（`@every Ns` 或 5 字段 cron） |
-| `CrontabDispatcher` | 调度器（`add()` / `tick()` / `run()`） |
+| `CrontabDispatcher` | 调度器（`add()` / `tick()` / `run()`）。worker 0 执行；传入 Redis 后按任务名加锁，回调返回才释放，默认 60 秒过期 |
 
 ---
 
@@ -162,10 +164,11 @@ Redis 队列（`push` / `reserve` / 失败重试 / 死信）。配置：`redis`�
 
 | 类 | 作用 |
 |---|---|
-| `Bootstrap` | 一行接入：自动替换 stock 组件类 + 注册默认服务器 |
+| `Bootstrap` | 自动替换仍是 stock 类的 request/response/db/redis，并注册默认服务器。session/cache/queue 需显式配置 |
 | `Coroutine\CoroutineContext` | 协程上下文存储（get/set/has/remove） |
 | `Coroutine\Sleep` | 协程内让出、协程外阻塞的统一 sleep |
-| `Log\CoroutineFileTarget` | 缓冲批量写日志目标（并发安全） |
+| `Log\CoroutineLogger` | 串行修改 `messages` 的 Logger，`Bootstrap` 会装上它 |
+| `Log\CoroutineFileTarget` | 缓冲批量写。目标自己的缓冲也有互斥 |
 | `Db\CoroutineCommand` | 自愈命令（检测连接丢失并 discard）+ 慢查询计时 + 熔断接入 |
 
 ---

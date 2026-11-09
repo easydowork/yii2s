@@ -59,6 +59,28 @@ class CoroutineUrlManagerTest extends TestCase
         $this->assertSame(2, $manager->getParseCacheSize(), 'the cache caps out at maxParseCache');
     }
 
+    public function testHostIsPartOfTheCacheKey(): void
+    {
+        $manager = new CoroutineUrlManager([
+            'enablePrettyUrl' => true,
+            'showScriptName' => false,
+            'rules' => [
+                'http://a.test/posts' => 'a/posts',
+                'http://b.test/posts' => 'b/posts',
+            ],
+        ]);
+
+        $this->assertSame(
+            ['a/posts', []],
+            $manager->parseRequest($this->createRequest('GET', '/posts', 'a.test'))
+        );
+        $this->assertSame(
+            ['b/posts', []],
+            $manager->parseRequest($this->createRequest('GET', '/posts', 'b.test'))
+        );
+        $this->assertSame(2, $manager->getParseCacheSize());
+    }
+
     private function createUrlManager(): CoroutineUrlManager
     {
         return new CoroutineUrlManager([
@@ -72,13 +94,13 @@ class CoroutineUrlManagerTest extends TestCase
         ]);
     }
 
-    private function createRequest(string $method, string $uri): CoroutineRequest
+    private function createRequest(string $method, string $uri, ?string $host = null): CoroutineRequest
     {
         $swooleRequest = new \Swoole\Http\Request();
         $swooleRequest->get = [];
         $swooleRequest->post = [];
         $swooleRequest->cookie = [];
-        $swooleRequest->header = [];
+        $swooleRequest->header = $host === null ? [] : ['host' => $host];
         $swooleRequest->server = [
             'request_method' => $method,
             'request_uri' => $uri,

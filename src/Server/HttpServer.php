@@ -19,6 +19,7 @@ use yii\base\Component;
 use yii\base\Event;
 use yii\base\InvalidConfigException;
 use yii\di\Instance;
+use Yii2S\Swoole\Scheduling\CrontabDispatcher;
 use Yii2S\Swoole\Websocket\WebsocketBroadcasterInterface;
 use Yii2S\Swoole\Websocket\WebsocketHandlerInterface;
 
@@ -433,7 +434,10 @@ class HttpServer extends Component
         // loop needs a coroutine; workerStart runs outside one. The warm-up is
         // best-effort and asynchronous: the worker serves requests immediately
         // and pays the connect latency only if the warm-up has not finished.
-        $server->on('workerStart', static function () use ($dispatcher, $prewarm, $maintenanceInterval, $server, $broadcaster): void {
+        $server->on('workerStart', static function ($workerServer, int $workerId) use ($dispatcher, $prewarm, $maintenanceInterval, $server, $broadcaster): void {
+            // Crontab ticks from every worker must run on worker 0 only,
+            // unless the dispatcher also holds a Redis lock across instances.
+            CrontabDispatcher::setWorkerId($workerId);
             // Kernel-level counters for /metrics (connection_num, abort_count,
             // ...). stats() reads the shared server state, so every worker sees
             // the same global numbers - the metrics middleware therefore
@@ -442,6 +446,19 @@ class HttpServer extends Component
             // implementations degrade gracefully without it.
             if ($dispatcher instanceof RequestDispatcher) {
                 $dispatcher->serverStatsProvider = static fn (): array => $server->stats();
+                if ($dispatcher->enableMetricsAggregation) {
+                    // Publish from every worker. A scrape sticks to one worker
+                    // under the default dispatch mode, so the others would
+                    // otherwise disappear from /metrics after the snapshot TTL.
+                    $intervalMs = (int) (MetricsAggregator::PUBLISH_INTERVAL * 1000);
+                    $publish = static function () use ($dispatcher): void {
+                        \Swoole\Coroutine::create(static function () use ($dispatcher): void {
+                            $dispatcher->publishWorkerMetrics();
+                        });
+                    };
+                    $publish();
+                    \Swoole\Timer::tick($intervalMs, $publish);
+                }
             }
 
             if ($broadcaster !== null) {

@@ -17,15 +17,11 @@ use yii\web\UploadedFile;
 /**
  * Coroutine-safe replacement for `yii\web\UploadedFile`.
  *
- * The stock class reads the process-global `$_FILES` array and caches the
- * parsed result in a static property. Under a resident coroutine server that
- * is unsafe: while one request is between "bind the request" and "read the
- * upload", a concurrent request replaces `$_FILES` (and clears the static
- * cache), so a request can end up reading another request's file.
- *
- * This class never touches `$_FILES`. It reads the already-normalized file
- * table from [[CoroutineRequest::getFileParams()]], which is bound to the
- * current coroutine, and keeps no static cache at all.
+ * Reads [[CoroutineRequest::getFileParams()]] for the current request and
+ * keeps no static cache. Coroutine requests do not publish `$_FILES`, so the
+ * stock class cannot see this upload or another request's. `saveAs()` copies
+ * or renames the temp file because Swoole does not register it with
+ * `move_uploaded_file()`.
  *
  * Migration is a single import swap in the code that handles uploads:
  *

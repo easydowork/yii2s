@@ -17,10 +17,11 @@ use Yii2S\Swoole\Redis\CoroutineRedisConnection;
 /**
  * Coroutine-safe Redis queue component.
  *
- * Jobs are stored in a sorted set (score = available-at timestamp), which
- * covers delayed delivery and visibility timeouts in a single structure.
- * Reserving is made atomic by a ZRANGEBYSCORE + ZREM pair: only the worker
- * whose ZREM actually removes the member owns the job.
+ * Waiting jobs live in a sorted set (score = available-at). Reserving moves a
+ * job into a second sorted set until [[ack()]] (handler success) or
+ * [[release()]] (handler failure). The reserved score is the visibility
+ * deadline: a worker that exits before either call leaves the job there, and
+ * the next [[reserve()]] treats that as a failed attempt.
  *
  * Configuration:
  *
@@ -50,6 +51,13 @@ class CoroutineRedisQueue extends Component
     /** @var int seconds a failed job waits before it becomes visible again */
     public int $ttr = 60;
 
+    /**
+     * Seconds a reserved job may stay in flight before the next [[reserve()]]
+     * treats the worker as crashed and counts a failed attempt. This is not
+     * [[ttr]]: a handler that runs longer than this is delivered again.
+     */
+    public int $visibilityTimeout = 60;
+
     /** @var int attempts after which a repeatedly failing job is buried */
     public int $maxAttempts = 3;
 
@@ -58,6 +66,24 @@ class CoroutineRedisQueue extends Component
 
     /** @var callable|null default job handler: function (array $payload, array $job): mixed */
     public $handler = null;
+
+    /**
+     * Atomically moves one due job from the delayed set onto the reserved set.
+     * KEYS: delayed, reserved. ARGV: now, visibility deadline.
+     */
+    private const RESERVE_SCRIPT = <<<'LUA'
+local now = tonumber(ARGV[1])
+local deadline = tonumber(ARGV[2])
+local jobs = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now, 'LIMIT', 0, 1)
+if #jobs == 0 then
+    return false
+end
+if redis.call('ZREM', KEYS[1], jobs[1]) == 1 then
+    redis.call('ZADD', KEYS[2], deadline, jobs[1])
+    return jobs[1]
+end
+return false
+LUA;
 
     private ?CoroutineRedisConnection $redisInstance = null;
 
@@ -105,35 +131,58 @@ class CoroutineRedisQueue extends Component
     }
 
     /**
-     * Reserves the next visible job, if any. The ZREM makes reservation
-     * atomic: concurrent workers cannot reserve the same job twice.
+     * Reserves the next visible job, if any.
+     *
+     * Expired reservations are requeued first (the worker that held them did
+     * not ack). The move from the delayed set onto the reserved set is one
+     * Redis script, so two workers cannot own the same member.
      */
     public function reserve(): ?array
     {
-        $redis = $this->getRedis();
-        // phpredis uses an options array instead of the raw LIMIT argument.
-        $members = $redis->zRangeByScore($this->getDelayedKey(), '-inf', (string) time(), ['limit' => [0, 1]]);
-        if (!is_array($members) || $members === []) {
-            return null;
-        }
+        $this->reclaimExpired();
 
-        $member = (string) $members[0];
-        if ((int) $redis->executeCommand('ZREM', [$this->getDelayedKey(), $member]) !== 1) {
-            return null; // another worker won the race
+        $now = time();
+        $member = $this->getRedis()->executeCommand('EVAL', [
+            self::RESERVE_SCRIPT,
+            [
+                $this->getDelayedKey(),
+                $this->getReservedKey(),
+                (string) $now,
+                (string) ($now + max(0, $this->visibilityTimeout)),
+            ],
+            2,
+        ]);
+        if (!is_string($member) || $member === '') {
+            return null;
         }
 
         return $this->decode($member);
     }
 
     /**
+     * Drops a successfully handled job from the reserved set.
+     *
+     * @param array $job the job as returned by [[reserve()]]
+     */
+    public function ack(array $job): void
+    {
+        $this->getRedis()->executeCommand('ZREM', [$this->getReservedKey(), $this->encode($job)]);
+    }
+
+    /**
      * Puts a failed job back into the queue, or buries it when it exceeded
-     * [[maxAttempts]].
+     * [[maxAttempts]]. Also used when a reservation outlives
+     * [[visibilityTimeout]].
      *
      * @param array $job the job as returned by [[reserve()]]
      * @param int|null $delay defaults to [[ttr]]
      */
     public function release(array $job, ?int $delay = null): void
     {
+        // Remove the member that reserve() stored, before attempts changes the
+        // JSON and would no longer match the reserved entry.
+        $this->getRedis()->executeCommand('ZREM', [$this->getReservedKey(), $this->encode($job)]);
+
         $job['attempts'] = (int) ($job['attempts'] ?? 0) + 1;
         if ($job['attempts'] >= $this->maxAttempts) {
             $this->getRedis()->executeCommand('LPUSH', [$this->getDeadKey(), $this->encode($job)]);
@@ -176,6 +225,7 @@ class CoroutineRedisQueue extends Component
             $processed++;
             try {
                 $handler($job['payload'], $job);
+                $this->ack($job);
             } catch (\Throwable) {
                 $this->release($job);
             }
@@ -219,6 +269,14 @@ class CoroutineRedisQueue extends Component
     }
 
     /**
+     * Number of jobs reserved by a worker and not yet acked or released.
+     */
+    public function countReserved(): int
+    {
+        return (int) $this->getRedis()->executeCommand('ZCARD', [$this->getReservedKey()]);
+    }
+
+    /**
      * Number of buried (exhausted) jobs.
      */
     public function countDead(): int
@@ -226,9 +284,44 @@ class CoroutineRedisQueue extends Component
         return (int) $this->getRedis()->executeCommand('LLEN', [$this->getDeadKey()]);
     }
 
+    /**
+     * Counts a crashed worker's reservation as a failed attempt and makes the
+     * job visible again (or buries it). Only the caller whose ZREM wins
+     * touches the job, so two workers cannot both reclaim it.
+     */
+    private function reclaimExpired(): void
+    {
+        $redis = $this->getRedis();
+        $members = $redis->zRangeByScore(
+            $this->getReservedKey(),
+            '-inf',
+            (string) time(),
+            ['limit' => [0, 20]]
+        );
+        if (!is_array($members)) {
+            return;
+        }
+
+        foreach ($members as $member) {
+            if ((int) $redis->executeCommand('ZREM', [$this->getReservedKey(), (string) $member]) !== 1) {
+                continue;
+            }
+            $job = $this->decode((string) $member);
+            if ($job === null) {
+                continue;
+            }
+            $this->release($job);
+        }
+    }
+
     private function getDelayedKey(): string
     {
         return $this->keyPrefix . $this->channel . ':delayed';
+    }
+
+    private function getReservedKey(): string
+    {
+        return $this->keyPrefix . $this->channel . ':reserved';
     }
 
     private function getDeadKey(): string

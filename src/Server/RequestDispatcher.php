@@ -267,6 +267,10 @@ class RequestDispatcher implements RequestDispatcherInterface
                     $request->setSwooleRequest($swooleRequest);
                 }
 
+                if ($app instanceof CoroutineApplication) {
+                    $app->restoreIdentity();
+                }
+
                 $response = $app->handleRequest($request);
                 if ($response instanceof CoroutineResponse && !$response->isSent) {
                     $response->finalize();
@@ -345,6 +349,26 @@ class RequestDispatcher implements RequestDispatcherInterface
      *
      * @return int total number of connections recycled during this pass
      */
+    /**
+     * Writes this worker's metrics snapshot to Redis. Called on a timer from
+     * worker start, and also by the `/metrics` scrape that this worker serves.
+     */
+    public function publishWorkerMetrics(): void
+    {
+        if (!$this->enableMetricsAggregation) {
+            return;
+        }
+
+        try {
+            $pools = $this->application !== null
+                ? PoolMetricsCollector::collect($this->application)
+                : [];
+            $this->getMetricsAggregator()->publish($this->requestMetrics, $pools);
+        } catch (Throwable $e) {
+            Yii::error('Failed to publish worker metrics: ' . $e->getMessage(), __METHOD__);
+        }
+    }
+
     public function maintainPools(): int
     {
         try {
@@ -396,12 +420,12 @@ class RequestDispatcher implements RequestDispatcherInterface
 
         if ($class === WebApplication::class) {
             // Default application class: swap in the coroutine-aware subclass
-            // so request/response/session/user are created per coroutine
-            // instead of being shared by concurrent requests.
+            // so request/response/session/user/view/errorHandler are created
+            // per coroutine instead of being shared by concurrent requests.
             $class = CoroutineApplication::class;
         } elseif (!is_a($class, CoroutineApplication::class, true)) {
             Yii::warning(sprintf(
-                'Application class "%s" does not extend %s: request/response/session/user are shared between concurrent requests.',
+                'Application class "%s" does not extend %s: request/response/session/user/view/errorHandler are shared between concurrent requests.',
                 $class,
                 CoroutineApplication::class
             ), __METHOD__);

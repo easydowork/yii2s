@@ -18,8 +18,6 @@ use yii\web\Controller;
 use yii\web\Cookie;
 use yii\web\NotFoundHttpException;
 use yii\web\Response;
-use yii\web\UploadedFile;
-
 /**
  * One action per Yii2 feature point. The compatibility suite drives these
  * through a real Swoole server so the whole request pipeline is exercised,
@@ -223,7 +221,7 @@ class CompatController extends Controller
     {
         $report = static function (string $field): array {
             $files = [];
-            foreach (UploadedFile::getInstancesByName($field) as $file) {
+            foreach (\Yii2S\Swoole\Runtime\CoroutineUploadedFile::getInstancesByName($field) as $file) {
                 $files[] = [
                     'name' => $file->name,
                     'size' => $file->size,

@@ -75,13 +75,31 @@ class CoroutineRequest extends Request
         $this->fileParams = null;
         $this->rawCookies = [];
 
-        // yii\web\UploadedFile reads the $_FILES superglobal directly (see
-        // its loadFiles()), so the official upload API only works when it is
-        // populated per request. Filling it here keeps it bound to the
-        // request lifecycle - RequestStateManager::cleanup() empties it
-        // again - and reset() clears UploadedFile's own static cache, which
-        // would otherwise leak the previous request's files.
-        $_FILES = $this->getFileParams();
+        // Inside a coroutine $_FILES is process-global, so publishing this
+        // request's files would let a concurrent request that calls the stock
+        // UploadedFile see them. Keep the table empty there. Callers use
+        // CoroutineUploadedFile, which reads [[getFileParams()]]. Outside a
+        // coroutine there is no concurrent request, and the stock class still
+        // needs the superglobal.
+        if (\Swoole\Coroutine::getCid() === -1) {
+            $_FILES = $this->getFileParams();
+            if (class_exists(\yii\web\UploadedFile::class)) {
+                \yii\web\UploadedFile::reset();
+            }
+        }
+    }
+
+    /**
+     * Clears a $_FILES table written outside a coroutine. Inside a coroutine
+     * the table is never published, so this is a no-op.
+     */
+    public static function releaseUploadedFiles(): void
+    {
+        if (\Swoole\Coroutine::getCid() !== -1 || $_FILES === []) {
+            return;
+        }
+
+        $_FILES = [];
         if (class_exists(\yii\web\UploadedFile::class)) {
             \yii\web\UploadedFile::reset();
         }

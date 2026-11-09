@@ -51,7 +51,8 @@ curl http://127.0.0.1:9501/demo/db
 
 ### 方式一：一行接入（推荐）
 
-现有 Yii2 应用只需在 `bootstrap` 里加一条——**其余零改动**：
+在 `bootstrap` 里加一条，stock 的 `request` / `response` / `db` / `redis` 会换成协程实现，原有参数保留。
+这不是业务零改动：还要满足 [6.3](#63-未实现清单与已知边界) 的边界。`session`、`cache`、`queue` 没有可自动替换的 stock 类，必须写成协程类。
 
 ```php
 // config/web.php
@@ -166,9 +167,10 @@ php yii queue/serve [--limit=N]                     # 队列消费 worker（无�
    请求里。请求态一律走 `Yii::$app->request/response/session/user`（这些每请求重建）。
 2. **`exit` / `die`** —— 不是结束请求，是**杀死整个服务器进程**。中止请求用
    `throw new \yii\web\HttpException(...)` 或直接 `return`。
-3. **直读超全局**：`$_GET/$_POST/$_SERVER/$_COOKIE/$_FILES/$_SESSION` —— 本包已做
-   按请求隔离与填充（`$_FILES` 每 request 重建），但语义以 Yii 组件为准；
-   `session_start()`/`setcookie()`/`header()` 等过程式 API 完全禁用。
+3. **直读超全局**：`$_GET` / `$_POST` / `$_SERVER` / `$_COOKIE` / `$_SESSION` 不要当请求数据源，
+   走 `Yii::$app->request`。协程里的请求不写 `$_FILES`，官方 `UploadedFile` 读不到本次上传，
+   也不会读到别的请求的文件。读和落盘用 `CoroutineUploadedFile`。
+   `session_start()` / `setcookie()` / `header()` 禁用。
 4. **手动 `new PDO` / `new Redis`** —— 阻塞调用且绕过连接池（并发下会耗尽系统连接）；
    一律走 `Yii::$app->db/redis/cache`（池化 + 协程粘性）。
 
@@ -189,6 +191,9 @@ php yii queue/serve [--limit=N]                     # 队列消费 worker（无�
 10. **乐观锁 `version` 列需在 AR 内存中初始化** —— DB 的 `DEFAULT 1` 只填列值不回填 AR
     状态；`insert()` 后 `update()` 时 `WHERE version = NULL` 永不匹配。在 `rules()` 加
     `['version'], 'default', 'value' => 1` 或在 `init()` 设 `$this->version = 1`。
+11. **子协程不继承视图** —— `view` 和 `errorHandler` 跟 request 一样按协程创建，但
+    `Coroutine::create()` 的子协程拿不到父协程那一份。要在子协程里渲染，先在父协程把
+    需要的数据取出来再传入。
 
 ### 资产与布局（真实场景教训：一个遗漏就是 405/404）
 
@@ -208,7 +213,7 @@ php yii queue/serve [--limit=N]                     # 队列消费 worker（无�
 ### 放心用（已验证原生可用）
 
 - `yii\web\User`（登录/identity 持久化，含 session id 重生成）、`HttpBasicAuth`、CSRF、
-  `UploadedFile`（读）与 `Runtime\CoroutineUploadedFile`（读+落盘）、`Session` flash、
+  `Runtime\CoroutineUploadedFile`（读和落盘，含并发上传）、`Session` flash、
   `Response::sendFile()`（含 Range 206）、事务（含嵌套 savepoint）、
   Redis MULTI/PIPELINE、`Query::batch()`、迁移与 AR 全套 —— 均有测试钉死
   （见第五部分，端到端清单见 5.4）。
@@ -224,16 +229,19 @@ swoole-cli example/yii swoole/start        （控制台入口，创建 console A
   └─ SwooleController::actionStart()
        └─ HttpServer::start()
             ├─ Coroutine::set(['hook_flags' => SWOOLE_HOOK_ALL])   ← I/O 全自动协程化
-            └─ Coroutine\run()
-                 └─ Swoole\Coroutine\Http\Server->handle('/', ...)
-                      └─ 每个请求一个协程：
-                           RequestDispatcher::dispatch()
-                             ├─ getApplication()            ← 首次创建，之后复用（常驻内存核心）
-                             ├─ request->setSwooleRequest() ← Swoole→Yii2 请求转换（含 $_FILES 填充）
-                             ├─ $app->handleRequest()       ← 标准 Yii2 路由/控制器流程
-                             ├─ response->finalize()        ← 内存中完成 formatter 管线
-                             ├─ SwooleResponseSender::send()
-                             └─ finally: RequestStateManager::cleanup()
+            ├─ new Swoole\Http\Server(host, port, SWOOLE_PROCESS)
+            │    worker_num = workerNum，0 时取 CPU 核数
+            ├─ on('request')  每个请求一个协程 → RequestDispatcher::dispatch()
+            ├─ on('workerStart')  每个 worker 自己的应用和连接池
+            │    （prewarm、池维护；Channel 不能跨 fork，所以不在 master 里建池）
+            └─ server->start()  阻塞到 master 退出
+                 RequestDispatcher::dispatch()
+                   ├─ getApplication()            ← 本 worker 内首次创建，之后复用
+                   ├─ request->setSwooleRequest() ← Swoole→Yii2；协程内不写 $_FILES
+                   ├─ $app->handleRequest()       ← 标准 Yii2 路由/控制器流程
+                   ├─ response->finalize()        ← 内存中完成 formatter 管线
+                   ├─ SwooleResponseSender::send()
+                   └─ finally: RequestStateManager::cleanup()
 ```
 
 ### 3.1.1 全景流程图（接入 → 启动 → 请求 → 停机）
@@ -244,7 +252,7 @@ swoole-cli example/yii swoole/start        （控制台入口，创建 console A
 // config/web.php
 return [
     'bootstrap' => [
-        ['class' => \Yii2S\Swoole\Bootstrap::class],   // ← 唯一必须的改动
+        ['class' => \Yii2S\Swoole\Bootstrap::class],   // stock request/response/db/redis 的替换入口
     ],
     'components' => [
         // request/response/db/redis 保持 stock 类，Bootstrap 自动替换
@@ -272,13 +280,13 @@ php yii swoole/start
   │
   ├─ SwooleController::actionStart()
   │    ├─ 读 web 配置里的 swooleHttpServer 组件
-  │    └─ HttpServer::start()
-  │         ├─ Coroutine::set(['hook_flags' => SWOOLE_HOOK_ALL])   I/O 自动协程化
-  │         ├─ 写 pid 文件（/tmp/yii2s-swoole-<uid>/<host>-<port>.pid）
-  │         └─ Coroutine\run()
-  │              └─ Swoole\Coroutine\Http\Server->handle('/', dispatcher)->start()
-  │                   │
-  │                   └─ 第一条请求时才创建常驻 Web Application：
+  │    └─ HttpServer::start()          （master 进程，start() 之前触发 beforeStart / afterStart）
+  │         ├─ Coroutine::set(['hook_flags' => SWOOLE_HOOK_ALL])
+  │         ├─ 写 pid 文件（系统临时目录 yii2s-swoole-<uid>/<host>-<port>.pid）
+  │         ├─ new Swoole\Http\Server(..., SWOOLE_PROCESS)
+  │         └─ server->start()
+  │              └─ 每个 worker 的 workerStart：
+  │                   └─ 本 worker 第一次请求（或 prewarm）时创建常驻 Web Application：
   │                        new CoroutineApplication(config/web.php)
   │                          ├─ Bootstrap::bootstrap()
   │                          │    ├─ request  → CoroutineRequest
@@ -286,7 +294,8 @@ php yii swoole/start
   │                          │    ├─ db       → CoroutineDbConnection
   │                          │    ├─ redis    → CoroutineRedisConnection
   │                          │    └─ 校正 @webroot / @web
-  │                          └─ 之后所有请求复用这个 Application
+  │                          └─ 这个 worker 之后的请求复用这份 Application
+  │                             （别的 worker 各有一份，池不共享）
 ```
 
 #### ③ 单次请求（每个连接一个协程）
@@ -305,9 +314,10 @@ php yii swoole/start
 │        ├─ CoroutineApplication::get()                               │
 │        │     request / response / session / user                    │
 │        │     ← 从「当前协程上下文」取，没有则按配置定义新建            │
-│        │       （并发请求互不可见）                                   │
+│        │     view / errorHandler 同样按当前协程新建                   │
 │        ├─ CoroutineRequest::setSwooleRequest()                      │
-│        │     query/body/headers/cookies/files 全部指向本次请求         │
+│        │     query/body/headers/cookies 指向本次请求                   │
+│        │     协程内不写进程级 $_FILES，上传走 CoroutineUploadedFile   │
 │        ├─ Yii::$app->handleRequest()                                │
 │        │     ├─ UrlManager 解析路由 → Controller/Action              │
 │        │     ├─ 业务代码                                            │
@@ -342,11 +352,12 @@ supervisor: SIGTERM           控制台: php yii swoole/stop
         │                              │
         └──────────────┬───────────────┘
                        ▼
-     信号回调只置标志（不在回调里做阻塞操作）
+            向 master 发送 SIGTERM
                        ▼
-     专用协程：等待在途请求排空（gracefulTimeout，默认 10s）
+     Swoole shutdown（reload_async + max_wait_time = gracefulTimeout，默认 10s）
+     等待 worker 排空在途请求，超时后强制退出
                        ▼
-     server->shutdown() → 删除 pid / stop 标志文件
+     server->start() 返回 → 删除 pid 文件 → EVENT_AFTER_STOP
 ```
 
 #### ⑤ 组件替换对照
@@ -373,19 +384,22 @@ supervisor: SIGTERM           控制台: php yii swoole/stop
                                         │
                      ┌──────────────────┴──────────────────┐
                      ▼                                     ▼
-               MySQL（连接池 ≤ poolMaxActive）        Redis（连接池）
+               MySQL（每 worker 一个池）            Redis（每 worker 一个池）
                                                            ▲
                                           php yii queue/serve（独立进程）
 ```
+
+`poolMaxActive` 是单个 worker 的上限。打到 MySQL 的连接大约是
+`poolMaxActive × worker_num × 实例数`。子连接开了从库时，还可能再占一条 PDO。
 
 ## 3.2 核心难点与设计决策
 
 | 难点 / 决策 | 对策与理由 |
 |---|---|
-| Yii2 设计给 FPM：请求结束进程清空，全局状态可随意用 | 常驻进程下禁止超全局变量；请求级状态全部协程隔离（§3.4） |
+| Yii2 设计给 FPM：请求结束进程清空，全局状态可随意用 | 常驻进程下禁止把请求态放进超全局和静态属性。request/response/session/user/view/errorHandler 按协程隔离（§3.4）。协程内不写 `$_FILES`。Logger 的 `messages` 由 `CoroutineLogger` 串行修改。同一 session 从打开到关闭持有 Redis 锁 |
 | `$_GET/$_POST/$_SERVER/$_COOKIE/$_SESSION` 全进程共享，协程下会串请求 | `CoroutineRequest` 从 Swoole Request 对象取数；`CoroutineSession` 用 Redis 存储 + 协程内存 |
 | 单个 PDO 连接不能被多个协程并发使用 | 连接池 + **协程粘性借用**：每个协程借一条独立连接，事务期间强绑定 |
-| 长生命周期对象持有请求状态（request/response/user） | `CoroutineApplication` 按**协程**从配置定义创建四个组件（并发互不可见）；请求结束由 `RequestStateManager` 归还池连接、sweep、flush 日志 |
+| 长生命周期对象持有请求状态（request/response/session/user/view/errorHandler） | `CoroutineApplication` 按**协程**从配置定义创建这些组件；请求结束由 `RequestStateManager` 归还池连接、sweep、flush 日志 |
 | 池耗尽的错误路径 | 阻塞等待 + `waitTimeout` 超时抛异常，不无限等待；`poolMaxActive` 是并发硬边界 |
 | 泄漏回收机制 | `sweep()`（每请求结束由活跃协程同步执行）而非 `Coroutine::defer`——defer 阶段做 channel IO 实测会崩溃，且 sweep 确定性更强 |
 | 借出登记数据结构 | 普通数组（`spl_object_id` 索引）而非 WeakMap——WeakMap 跨协程写入不可见且会崩进程（独立脚本实锤） |
@@ -416,8 +430,9 @@ release():
 
 ## 3.4 请求状态重建（`Runtime/RequestStateManager.php`）
 
-请求作用域的四个组件（request/response/session/user）由 `CoroutineApplication` 在**每个
-协程**里按配置定义创建，协程结束即随上下文回收，并发请求天然互不可见。
+请求作用域组件（request/response/session/user/view/errorHandler）由 `CoroutineApplication` 在**每个
+协程**里按配置定义创建，协程结束即随上下文回收。其余组件在 worker 内共享。
+子协程不继承这份上下文。
 
 `RequestStateManager` 负责请求结束后的收尾：
 
@@ -425,6 +440,7 @@ release():
 2. 各池 `sweep()`：回收"借用协程已结束、未归还"的连接（如子协程泄漏）；
 3. 重置共享组件缓存（`set()` 回配置定义），作为非协程路径的兜底；
 4. `Yii::getLogger()->flush(true)` —— FPM 的"请求结束自动 flush 日志"在常驻进程不存在，必须手动做。
+   `CoroutineFileTarget` 锁住的是目标自己的缓冲；`Logger::$messages` 在 flush 让出协程时仍可能被另一个请求改写。
 
 ## 3.5 兼容性开关
 
@@ -443,10 +459,10 @@ src/
 ├── Redis/CoroutineRedisConnection.php  协程安全 Redis（原生 phpredis + 池）
 ├── Cache/CoroutineRedisCache.php    Redis 缓存（兼容 yii\caching\Cache 全 API）
 ├── Session/CoroutineSession.php     Redis 会话（完全绕开 $_SESSION）
-├── Queue/CoroutineRedisQueue.php    Redis 队列（ZSET：延迟投递/重试/死信）
+├── Queue/CoroutineRedisQueue.php    Redis 队列（delayed + reserved；超时未确认按失败重投）
 ├── Runtime/
-│   ├── CoroutineApplication.php     请求作用域组件按协程解析（并发请求互不可见）
-│   ├── CoroutineRequest.php         Swoole→Yii2 请求适配（含 cookie 签名验证、上传转换）
+│   ├── CoroutineApplication.php     request/response/session/user/view/errorHandler 按协程解析
+│   ├── CoroutineRequest.php         Swoole→Yii2 请求适配（cookie 签名；协程内不写 $_FILES）
 │   ├── CoroutineUploadedFile.php    协程版 UploadedFile（不读 $_FILES，saveAs 走 rename/copy）
 │   ├── CoroutineResponse.php        内存 finalize（beforeSend/prepare/afterSend）
 │   ├── SwooleResponseSender.php     响应下发（headers/cookies/内容/文件流）
@@ -468,46 +484,20 @@ src/
 
 ## 4.1 生命周期插槽（定时任务等 Swoole 特性的挂载点）
 
-`HttpServer` 暴露三个 Yii2 风格事件，是所有"长生命周期特性"（定时任务、预热、
-指标上报、优雅收尾）的官方挂载点：
+`HttpServer` 暴露三个 Yii2 事件，都发生在 **master**，不是 worker：
 
-| 事件 | 触发时机 | 典型用途 |
+| 事件 | 触发时机 | 适合做什么 |
 |---|---|---|
-| `EVENT_BEFORE_START` | 服务器启动前（协程已就绪） | 预加载缓存、启动定时任务协程 |
-| `EVENT_AFTER_START` | 监听就绪、开始接受流量 | 健康上报到注册中心、打点 |
-| `EVENT_AFTER_STOP` | 优雅停机完成 | 指标落盘、通知下游 |
+| `EVENT_BEFORE_START` | 创建 `Swoole\Http\Server` 之前 | 校验配置。此时还没有 worker，协程 hook 也还没打开 |
+| `EVENT_AFTER_START` | `server->start()` 阻塞之前 | 打一条启动日志。此时尚未 accept |
+| `EVENT_AFTER_STOP` | `server->start()` 返回之后 | 进程退出监听之后的收尾通知 |
 
-### 示例：周期任务
+连接池预热、池维护和 WebSocket 广播挂在服务器内部的 `workerStart` 上，没有对应的配置事件。
+不要在 `beforeStart` 里 `Coroutine::create()`：那条协程留在 master 里，fork 出的 worker 带不走它，也借不到 worker 自己的连接池。
 
-```php
-use Yii2S\Swoole\Server\HttpServer;
-use Swoole\Coroutine;
+定时任务可以在每个 worker 里 `tick()`。服务器在 worker 启动时记下 worker id，只有 worker 0 执行回调。多台机器各有自己的 worker 0 时，把 Redis 连接传给 `CrontabDispatcher`：同一任务名一把锁，回调返回才释放，默认 60 秒后过期。本进程里回调还没返回时也不会再启动它。`@every` 按时钟取模，不是从进程启动起算的间隔。
 
-'swooleHttpServer' => [
-    'class' => HttpServer::class,
-    'on beforeStart' => function (): void {
-        // 每 60 秒执行一次的周期任务：协程循环 + sleep 即是 cron 语义
-        Coroutine::create(function (): void {
-            while (true) {
-                doCleanupWork();
-                Coroutine::sleep(60);
-            }
-        });
-    },
-    'on afterStop' => function (): void {
-        flushMetrics();
-    },
-],
-```
-
-要点：回调运行在服务器协程空间内，可直接创建子协程、借用池连接；
-周期任务用「协程 + sleep 循环」实现（不要用 `Timer`——timer 回调里做池借还
-语义差且与优雅停机交互复杂）；优雅停机时协程随进程退出，周期任务内部
-应保证单轮操作原子性。
-
-> 后续可选增强（未实现，避免过度设计）：声明式 `PeriodicTask` 组件
-> （`tasks => ['cleanup' => ['every' => 60, 'handler' => ...]]`）。等出现
-> 3 个以上真实周期任务场景再做。
+`on afterStop` 只适合 master 退出后的通知。不要在里面假设 worker 的连接池还在。
 
 ## 4.2 生产部署（nginx + 多实例）
 
@@ -696,7 +686,7 @@ Linux 生产环境的基准待上线后另行实测（多进程模型与 macOS �
 
 ## 5.1 测试体系
 
-211 tests / 852 assertions（2 skipped），覆盖十五个目录：连接池并发（借还配对/超时/sweep/健康机制）、
+238 tests / 949 assertions，覆盖十五个目录：连接池并发（借还配对/超时/sweep/健康机制）、
 请求适配（头/cookie 签名/上传三种形状）、服务器集成（**真实 socket 交互，非 mock**：
 CSRF 全流程、表单三件套、静态文件、优雅停机、watch 热重载）、DB（事务含嵌套
 savepoint、并发 AR + 并发事务、Query::batch、协程外 detached 直连）、Redis
@@ -801,46 +791,20 @@ Log（`tests/log/`）、控制台（`tests/console/`）、上传/web（`tests/we
 
 ## 6.1 生命周期插槽（定时任务等 Swoole 特性的挂载点）
 
-`HttpServer` 暴露三个 Yii2 风格事件，是所有"长生命周期特性"（定时任务、预热、
-指标上报、优雅收尾）的官方挂载点：
+`HttpServer` 暴露三个 Yii2 事件，都发生在 **master**，不是 worker：
 
-| 事件 | 触发时机 | 典型用途 |
+| 事件 | 触发时机 | 适合做什么 |
 |---|---|---|
-| `EVENT_BEFORE_START` | 服务器启动前（协程已就绪） | 预加载缓存、启动定时任务协程 |
-| `EVENT_AFTER_START` | 监听就绪、开始接受流量 | 健康上报到注册中心、打点 |
-| `EVENT_AFTER_STOP` | 优雅停机完成 | 指标落盘、通知下游 |
+| `EVENT_BEFORE_START` | 创建 `Swoole\Http\Server` 之前 | 校验配置。此时还没有 worker，协程 hook 也还没打开 |
+| `EVENT_AFTER_START` | `server->start()` 阻塞之前 | 打一条启动日志。此时尚未 accept |
+| `EVENT_AFTER_STOP` | `server->start()` 返回之后 | 进程退出监听之后的收尾通知 |
 
-### 示例：周期任务
+连接池预热、池维护和 WebSocket 广播挂在服务器内部的 `workerStart` 上，没有对应的配置事件。
+不要在 `beforeStart` 里 `Coroutine::create()`：那条协程留在 master 里，fork 出的 worker 带不走它，也借不到 worker 自己的连接池。
 
-```php
-use Yii2S\Swoole\Server\HttpServer;
-use Swoole\Coroutine;
+定时任务可以在每个 worker 里 `tick()`。服务器在 worker 启动时记下 worker id，只有 worker 0 执行回调。多台机器各有自己的 worker 0 时，把 Redis 连接传给 `CrontabDispatcher`：同一任务名一把锁，回调返回才释放，默认 60 秒后过期。本进程里回调还没返回时也不会再启动它。`@every` 按时钟取模，不是从进程启动起算的间隔。
 
-'swooleHttpServer' => [
-    'class' => HttpServer::class,
-    'on beforeStart' => function (): void {
-        // 每 60 秒执行一次的周期任务：协程循环 + sleep 即是 cron 语义
-        Coroutine::create(function (): void {
-            while (true) {
-                doCleanupWork();
-                Coroutine::sleep(60);
-            }
-        });
-    },
-    'on afterStop' => function (): void {
-        flushMetrics();
-    },
-],
-```
-
-要点：回调运行在服务器协程空间内，可直接创建子协程、借用池连接；
-周期任务用「协程 + sleep 循环」实现（不要用 `Timer`——timer 回调里做池借还
-语义差且与优雅停机交互复杂）；优雅停机时协程随进程退出，周期任务内部
-应保证单轮操作原子性。
-
-> 后续可选增强（未实现，避免过度设计）：声明式 `PeriodicTask` 组件
-> （`tasks => ['cleanup' => ['every' => 60, 'handler' => ...]]`）。等出现
-> 3 个以上真实周期任务场景再做。
+`on afterStop` 只适合 master 退出后的通知。不要在里面假设 worker 的连接池还在。
 
 ## 6.2 连接池扩展规划
 
@@ -876,13 +840,18 @@ $pool = new ConnectionPool(
 
 ## 6.3 未实现清单与已知边界
 
-**主动取舍（非缺陷）**：
+**当前边界（代码如此，不是路线图上的待办）**：
 
 - 需要 `urlManager.enablePrettyUrl = true`（`?r=` 路由依赖 `$_GET`，协程不安全）
-- 多进程模型适合 API 服务；CPU 密集任务应交给独立进程
-- Queue 未兼容 `yii\queue\Queue` 接口（避免依赖；列为后续增强）
-- MySQL 主从/读写分离未透传（池化模式下需真实主从环境验证，不假装支持）
+- 同一个 worker 默认可并发多个请求。按协程隔离的是 `request` / `response` / `session` / `user` / `view` / `errorHandler`。子协程不继承这些实例
+- 协程内不写 `$_FILES`。官方 `UploadedFile` 读不到上传；读和落盘用 `CoroutineUploadedFile`（`saveAs()` 不走 `move_uploaded_file()`）
+- `CoroutineRedisQueue` 不实现 `yii\queue\Queue`。执行中的任务放在 reserved 集合，超过 `visibilityTimeout` 未确认就按失败重投。处理时间长于租约、或处理本身不能重复执行时，不要用它
+- `CrontabDispatcher` 默认只在 worker 0 执行。多实例传入 Redis 后按任务名加锁，锁住整次执行，默认 60 秒过期。`@every` 是时钟取模
+- 同一 session 从 `open()` 到 `close()` 持有 Redis 锁。请求结束会关闭会话。锁等待默认 5 秒，崩溃后锁自行过期
+- MySQL 主从配置会拷进每条池化子连接，读写选择仍走 Yii 自己的逻辑。`poolMaxActive` 是 MySQL 连接预算：开了从库时每个对象会占主库和从库各一条 PDO，池里的对象数因此是预算的一半。主从切换本身没有在真实复制环境里验收过
+- 会话载荷用 PHP `serialize`。读回时禁止实例化对象（`allowed_classes => false`）
 - 协程 HttpClient 组件未内置（Swoole 原生 `Coroutine\Http\Client` 可直接用）
+- CPU 密集任务会卡住 worker 的事件循环，交给独立进程
 
 ---
 
@@ -909,7 +878,8 @@ $pool = new ConnectionPool(
 10. **日志缓冲必须加互斥锁** —— 每请求 flush 并发读改写 `messages`（Channel 互斥锁）；
     **锁的懒初始化必须留在协程内**（协程外 push Channel 令牌静默失败 → 死锁，实测）。
 11. **`$_FILES` 要按请求填充并 reset `UploadedFile` 静态缓存** —— 官方 `UploadedFile::loadFiles()`
-    直读 `$_FILES` 超全局；静态缓存跨请求泄漏会串文件。
+    直读 `$_FILES` 超全局；静态缓存跨请求泄漏会串文件。带文件的请求拿一把 worker 级锁再写入，
+    请求结束才清空。没有上传的请求不能去清这张表。
 12. **Cookie 必须走签名验证通道** —— "官方静态 API 依赖进程态"的模式；协程组件覆写时
     逐条对照官方实现（`loadCookies` 的 validateData 不可省）。
 13. **Swoole `cookie()` 自动 urlencode，`rawcookie()` 不编** —— 与 PHP `setcookie()` 对齐；
