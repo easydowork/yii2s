@@ -241,6 +241,11 @@ php yii swoole/start        # 就这么跑起来了
     // stdout（容器采集场景）；settings 里的 log_file/log_level 键优先级更高
     'logFile' => '@app/runtime/logs/swoole.log',
     'logLevel' => SWOOLE_LOG_WARNING,
+    // 协程运行时 hook（默认 SWOOLE_HOOK_ALL，无需配置）。异步风格 Http\Server
+    // 自身不会开启 hook——不开启则 PDO/mysqli/文件 IO 阻塞 worker 事件循环，
+    // 连接池退化为串行查询（实测 PDO SLEEP(0.2)×20 并发：92 vs 19 QPS）。
+    // 设为 null 可保持你自己通过 Coroutine::set() 配置的值。
+    // 'hookFlags' => SWOOLE_HOOK_ALL,
     'dispatcher' => new \Yii2S\Swoole\Server\RequestDispatcher('@app/config/web.php', [
         'enablePoolMetricsEndpoint' => true,  // /__pool
         'enableMetricsEndpoint' => true,      // /metrics
@@ -250,6 +255,20 @@ php yii swoole/start        # 就这么跑起来了
 ```
 
 两种方式下，cache / session / queue 都需要显式协程类（无 stock 对应物可自动替换）：
+
+**生产推荐 settings 清单**（按需加到 `settings` 键；每项的取舍见
+`doc/ROADMAP.md` §6.3）：
+
+```php
+'settings' => [
+    'max_request'          => 10000, // 泄漏兜底：worker 每 N 请求优雅重启（灰度期结合 RSS 曲线决定）
+    'max_concurrency'      => 200,   // HTTP 并发请求上限（v4.8.2+，超限 503）
+    'max_coroutine'        => 200,   // 每 worker 协程上限（与并发模型对齐）
+    'open_tcp_nodelay'     => true,  // API 小响应降延迟
+    'heartbeat_check_time' => 300,   // 清理半开连接
+    // 'open_cpu_affinity' => true,   // 独立多核机可开（IO 密集可配合 cpu_affinity_ignore 留 CPU0）
+],
+// 同时：ulimit -n（nofile）要调大——Swoole 的 max_conn 默认跟随它。
 
 ```php
 'cache' => [

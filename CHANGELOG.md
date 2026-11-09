@@ -102,6 +102,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Coroutine runtime hooks enabled by default (behavior change)**: the
+  async-style `Swoole\Http\Server` does not enable the runtime hook on its
+  own, so PDO/mysqli/file IO **blocked the worker event loop** and the
+  coroutine pool degraded to serialized queries. `HttpServer` now applies
+  `Coroutine::set(['hook_flags' => SWOOLE_HOOK_ALL])` before start
+  (`$hookFlags`, default `SWOOLE_HOOK_ALL`, `null` keeps your own
+  `Coroutine::set()` configuration). Baseline: PDO `SLEEP(0.2)` at 20
+  concurrency with 4 workers - 92 qps with hooks vs 19 without.
+- **Opinionated server limits**: `package_max_length` (2 MB, matches Swoole's
+  own behavior and pairs with nginx `client_max_body_size`) and `backlog`
+  (2048) are pinned; `log_date_with_microseconds` (multi-worker triage) and
+  `display_errors=false` (no PHP noise in responses/stdout) are defaulted.
+  Explicit `settings` keys still win; `dispatch_mode` stays untouched (2 vs 3
+  measured identical throughput for this workload - see ROADMAP §6.2).
 - **Swoole server log defaults**: `HttpServer` now maps `log_file` to a
   per-user runtime file next to the pid file (`swoole-<host>-<port>.log`)
   with `SWOOLE_LOG_ROTATION_DAILY`, so internal Swoole logs (worker crashes,

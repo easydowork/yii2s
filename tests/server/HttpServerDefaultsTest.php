@@ -15,12 +15,13 @@ use Yii2S\Swoole\Server\RequestDispatcher;
 use yii2stest\TestCase;
 
 /**
- * Unit tests for the default Swoole log_* settings (log_file, log_rotation,
- * log_level) applied by HttpServer::applySettings().
+ * The home for every default-server-settings assertion (the "opinionated
+ * defaults" applied by HttpServer::applySettings()), plus the property
+ * defaults of the component itself.
  *
  * @group server
  */
-class HttpServerLogSettingsTest extends TestCase
+class HttpServerDefaultsTest extends TestCase
 {
     private function makeServer(array $config = []): HttpServer
     {
@@ -85,16 +86,57 @@ class HttpServerLogSettingsTest extends TestCase
         $this->assertArrayNotHasKey('log_rotation', $server->settings);
     }
 
+    public function testRequestBodyAndBacklogDefaults(): void
+    {
+        $server = $this->makeServer();
+        $this->runInCoroutine(function () use ($server): void {
+            $this->apply($server);
+        });
+
+        // Swoole already behaves this way (2 MB / 413 verified); the defaults
+        // pin the limits so they are discoverable and pair with nginx.
+        $this->assertSame(2 * 1024 * 1024, $server->settings['package_max_length'] ?? null);
+        $this->assertSame(2048, $server->settings['backlog'] ?? null);
+    }
+
+    public function testLogMicrosecondsAndDisplayErrorsDefaults(): void
+    {
+        $server = $this->makeServer();
+        $this->runInCoroutine(function () use ($server): void {
+            $this->apply($server);
+        });
+
+        // Official key spelling is log_date_with_microseconds (not "microtime").
+        $this->assertSame(true, $server->settings['log_date_with_microseconds'] ?? null);
+        $this->assertSame(false, $server->settings['display_errors'] ?? null);
+    }
+
+    public function testHookFlagsPropertyDefaultsToAll(): void
+    {
+        $this->assertSame(SWOOLE_HOOK_ALL, $this->makeServer()->hookFlags);
+    }
+
+    public function testHookFlagsNullIsAllowedForSelfManagedHooks(): void
+    {
+        $this->assertNull($this->makeServer(['hookFlags' => null])->hookFlags);
+    }
+
     public function testUserSettingsWin(): void
     {
         $server = $this->makeServer([
-            'settings' => ['log_file' => '/tmp/yii2s-user-override.log'],
+            'settings' => [
+                'log_file' => '/tmp/yii2s-user-override.log',
+                'package_max_length' => 8 * 1024 * 1024,
+                'backlog' => 512,
+            ],
         ]);
         $this->runInCoroutine(function () use ($server): void {
             $this->apply($server);
         });
 
         $this->assertSame('/tmp/yii2s-user-override.log', $server->settings['log_file'] ?? null);
+        $this->assertSame(8 * 1024 * 1024, $server->settings['package_max_length'] ?? null);
+        $this->assertSame(512, $server->settings['backlog'] ?? null);
         // rotation is still defaulted when the user only overrides log_file
         $this->assertSame(SWOOLE_LOG_ROTATION_DAILY, $server->settings['log_rotation'] ?? null);
     }

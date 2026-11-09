@@ -117,6 +117,18 @@ class HttpServer extends Component
      *  null keeps Swoole's default (INFO). A `settings[log_level]` key wins. */
     public ?int $logLevel = null;
 
+    /** @var int|null coroutine runtime hook flags (see the Swoole handbook
+     *  "one-click coroutine" chapter), applied via Coroutine::set() right
+     *  before start(). Default SWOOLE_HOOK_ALL: the async-style
+     *  Swoole\Http\Server does NOT enable the runtime hook on its own
+     *  (settings['hook_flags'] is ignored on 6.2.x and Coroutine\run enables
+     *  it only for its own path), so without this, PDO/mysqli/file IO block
+     *  the worker event loop and the coroutine pool degrades to serialized
+     *  queries. Set to null to keep whatever you configured yourself via
+     *  Coroutine::set(). Baseline (PDO SLEEP(0.2), 20 concurrency, 4
+     *  workers): 92 qps with hooks vs 19 without. */
+    public ?int $hookFlags = SWOOLE_HOOK_ALL;
+
     private ?SwooleHttpServer $server = null;
 
     private bool $isRunning = false;
@@ -225,6 +237,13 @@ class HttpServer extends Component
 
         $this->isRunning = true;
         $this->writePidFile();
+
+        // Coroutine runtime hooks MUST be configured before start() (the
+        // handbook-equivalent of ini_set). See the $hookFlags property for
+        // why this is a life-saving default rather than an optimization.
+        if ($this->hookFlags !== null) {
+            \Swoole\Coroutine::set(['hook_flags' => $this->hookFlags]);
+        }
 
         // Explicit SWOOLE_PROCESS: a master + worker_num workers. The default
         // on some builds is SWOOLE_BASE (single process), which neither scales
@@ -339,6 +358,23 @@ class HttpServer extends Component
         $this->settings += [
             'worker_num' => $this->workerNum > 0 ? $this->workerNum : max(1, swoole_cpu_num()),
         ];
+
+        // --- request body / connection limits ---
+        // package_max_length: Swoole already rejects bodies over 2 MB with
+        // 413 (verified on 6.2.x). Pinning the value makes the limit
+        // discoverable and pairs with nginx `client_max_body_size`: keep both
+        // aligned, or nginx accepts bodies Swoole then rejects. Note the
+        // handbook limits: HTTP GET caps at 8 KB (not configurable), POST
+        // over the limit is cut off with the connection.
+        // backlog: the stock listen backlog drops SYNs during connection
+        // bursts (bench: 50+ new connections at once). 2048 is clamped by
+        // the kernel somaxconn, so raising it is safe on every platform.
+        // Overrides: settings['package_max_length'] / settings['backlog'].
+        $this->settings += [
+            'package_max_length' => 2 * 1024 * 1024,
+            'backlog' => 2048,
+        ];
+
         if ($this->gracefulTimeout > 0) {
             // reload_async + max_wait_time together make reload/shutdown wait
             // for in-flight requests: without reload_async a worker is killed
@@ -370,6 +406,18 @@ class HttpServer extends Component
         if ($this->logLevel !== null) {
             $this->settings += ['log_level' => $this->logLevel];
         }
+
+        // Microsecond timestamps: multi-worker logs interleave, so events
+        // can only be attributed during incident triage with sub-second
+        // precision. Note the official key spelling
+        // (log_date_with_microseconds). Override: settings[log_date_with_microseconds].
+        // display_errors=false: PHP notices/warnings must not leak into
+        // responses or stdout; errors still reach log_file (SWOOLE_LOG_ERROR)
+        // and Yii's log target. Override: settings['display_errors'].
+        $this->settings += [
+            'log_date_with_microseconds' => true,
+            'display_errors' => false,
+        ];
 
         $server->set($this->settings);
     }
