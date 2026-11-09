@@ -478,6 +478,12 @@ class CompatHttpFeaturesTest extends CompatTestCase
                     'headers' => ['X-Forwarded-For' => '203.0.113.9'],
                 ]);
                 $this->assertSame('127.0.0.1', $res['json']['userIP'], 'untrusted X-Forwarded-For is ignored');
+
+                // The one-line integration config omits every 'class' key:
+                // pin the coroutine class names so the auto-replacement can
+                // never silently regress to the stock classes.
+                $this->assertSame(\Yii2S\Swoole\Runtime\CoroutineRequest::class, $res['json']['requestClass']);
+                $this->assertSame(\Yii2S\Swoole\Runtime\CoroutineResponse::class, $res['json']['responseClass']);
             } finally {
                 $this->stopServer();
             }

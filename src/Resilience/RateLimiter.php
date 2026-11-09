@@ -21,10 +21,20 @@ use Yii2S\Swoole\Redis\CoroutineRedisConnection;
  */
 class RateLimiter
 {
-    public function __construct(
-        private CoroutineRedisConnection $redis,
-        private string $prefix = 'yii2s:ratelimit:',
-    ) {
+    /**
+     * Public by Yii-ecosystem convention: the DI container passes the config
+     * key to the constructor AND runs configure() afterwards, so the property
+     * must be writable from outside (private/promoted private would throw
+     * "Cannot access private property" during configure).
+     */
+    public CoroutineRedisConnection $redis;
+
+    public string $prefix;
+
+    public function __construct(CoroutineRedisConnection $redis, string $prefix = 'yii2s:ratelimit:')
+    {
+        $this->redis = $redis;
+        $this->prefix = $prefix;
     }
 
     /**

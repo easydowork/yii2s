@@ -66,7 +66,11 @@ class CompatController extends Controller
             'post' => $request->getBodyParams(),
             'header' => $request->getHeaders()->get('X-Compat'),
             'userAgent' => $request->getUserAgent(),
-            'contentType' => $request->getContentType(),
+            // Proves the Bootstrap auto-replacement: the app-auto config omits
+            // the 'class' key, so this asserts the coroutine request/response
+            // classes were wired up without any explicit declaration.
+            'requestClass' => get_class($request),
+            'responseClass' => get_class(Yii::$app->response),            'contentType' => $request->getContentType(),
             'isAjax' => $request->getIsAjax(),
             'pathInfo' => $request->getPathInfo(),
             'url' => $request->getUrl(),

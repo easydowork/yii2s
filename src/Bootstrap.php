@@ -121,6 +121,20 @@ class Bootstrap implements BootstrapInterface
             }
 
             $class = $definition['class'] ?? null;
+            if ($class === null) {
+                // Definitions without an explicit class key merge with
+                // coreComponents() later and instantiate the stock class.
+                // Treat them as stock-class definitions so they get the
+                // coroutine replacement too (a definition that REALLY wants
+                // another class states it explicitly and stays untouched).
+                // Note: definitions carrying coroutine-only config keys (e.g.
+                // trustedProxies on request) MUST declare the coroutine class
+                // explicitly - web Application::bootstrap() resolves `request`
+                // before extension bootstraps run, so the swap happens too
+                // late for them.
+                $class = array_key_first($map);
+                $definition['class'] = $class;
+            }
             if (!is_string($class) || !isset($map[$class])) {
                 continue;
             }

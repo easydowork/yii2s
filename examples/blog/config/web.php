@@ -30,8 +30,28 @@ $config = [
             'schemaCacheDuration' => 3600,
         ]),
         'request' => [
+            // The explicit class is REQUIRED here (not style): web
+            // Application::bootstrap() resolves `request` BEFORE extension
+            // bootstraps run, so a definition that relies on the stock
+            // default would instantiate yii\web\Request and FATAL on
+            // `trustedProxies` (a CoroutineRequest-only property) before the
+            // auto-replacement ever gets a chance. State the class whenever
+            // the definition carries coroutine-specific keys.
+            'class' => \Yii2S\Swoole\Runtime\CoroutineRequest::class,
             'cookieValidationKey' => 'blog-demo-validation-key',
+            // Behind nginx: trust the local proxy chain so getUserIP()
+            // resolves the REAL client IP from the right-most untrusted
+            // X-Forwarded-For entry instead of the proxy address.
+            'trustedProxies' => ['127.0.0.1', '::1'],
         ],
+        // NOTE: the RateLimiter for the demo endpoint (site/api) is built
+        // inside SiteController::actionApi() via Yii::$app->get('redis') -
+        // NOT as a component here. Reasons (learned the hard way):
+        // 1) `Instance::of('redis')` in a component definition resolves
+        //    through the GLOBAL Yii::$container, which has no 'redis' entry
+        //    and case-insensitively instantiates the native \Redis class;
+        // 2) a closure definition is invoked by the DI container whose
+        //    parameters resolve by name against the container, not $app.
         // Standard Yii2 wiring: route exceptions through site/error so the
         // custom error view (views/site/error.php) is rendered.
         'errorHandler' => [

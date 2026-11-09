@@ -113,6 +113,39 @@ class SiteController extends Controller
     }
 
     /**
+     * Security demo: echoes the client IP resolved by Yii. Behind nginx with
+     * `trustedProxies` configured, this returns the REAL client IP from
+     * `X-Forwarded-For`/`X-Real-IP` instead of the proxy's 127.0.0.1.
+     */
+    public function actionIp(): string
+    {
+        return json_encode(['ip' => Yii::$app->request->getUserIP()]);
+    }
+
+    /**
+     * Security demo: RateLimiter in front of an API-ish endpoint.
+     * 10 requests per 10s per client IP; over the limit answers 429.
+     */
+    public function actionApi(): void
+    {
+        // Built inline: component definitions resolve through the DI
+        // container (see the note in config/web.php), and the redis
+        // application component lives in the service locator, not there.
+        $limiter = new \Yii2S\Swoole\Resilience\RateLimiter(
+            Yii::$app->get('redis')
+        );
+        $key = 'api:' . Yii::$app->request->getUserIP();
+
+        if (!$limiter->allow($key, 10, 10)) {
+            Yii::$app->response->statusCode = 429;
+            Yii::$app->response->content = 'rate limited';
+            return;
+        }
+
+        Yii::$app->response->content = 'ok';
+    }
+
+    /**
      * Public signup: a new account starts as an `author` and is logged in.
      */
     public function actionSignup()
