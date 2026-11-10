@@ -15,7 +15,7 @@
 |---|---|
 | 核心 | 多进程 `Swoole\Http\Server`（`worker_num = CPU 核数`）、协程连接池、request/response/session/user/view/errorHandler 按协程隔离、优雅停机/热重载 |
 | 性能 | 路由缓存、单飞锁（thundering herd 抑制）、raw 路由极简通道、内置压测器 |
-| 观测 | `/metrics`（Prometheus：RED + 池 + 进程 + 跨 worker 聚合 + 系统负载）、`/__pool`、`swoole/status` 运行时面板 |
+| 观测 | `/metrics`（Prometheus：RED + 池 + 进程 + 内核级 `Server->stats()` + 跨 worker 聚合 + 系统负载，可选 `adminToken` 门禁）、`/__pool`、`swoole/status` 运行时面板、生命周期事件（workerError/beforeShutdown/workerExit/workerStop） |
 | 韧性 | 熔断器、限流、重试、连接池健康机制（min-idle / max-lifetime / 空闲保活）、DB 断线自愈 |
 | 运维 | `swoole/start|stop|reload|check|status|routes`、`queue/serve`、长跑检漏脚本、watch 热重载 |
 | 调度 | 秒级定时任务（worker 0；多实例用 Redis 锁盖住整次执行） |
@@ -172,7 +172,9 @@ return [
     // Bootstrap 会把 stock 类（yii\web\Request、yii\db\Connection、
     // yii\redis\Connection ...）自动替换为协程版，所有参数原封不动；
     // 没有显式配置 swooleHttpServer 时会注册一个默认服务器组件
-    //（127.0.0.1:9501，dispatcher 指向 @app/config/web.php）。
+    //（127.0.0.1:9501，dispatcher 指向 @app/config/web.php，documentRoot
+    // 指向 @app/web —— 直连调试时 css/js/图片/字体也能服务；生产反代形态
+    // 下静态请求由 nginx 拦截，此配置不参与）。
 ];
 ```
 
@@ -267,6 +269,33 @@ php yii swoole/start        # 就这么跑起来了
 
 两种方式下，cache / session / queue 都需要显式协程类（无 stock 对应物可自动替换）：
 
+```php
+'cache' => [
+    'class' => \Yii2S\Swoole\Cache\CoroutineRedisCache::class,
+    'redis' => 'redis',               // getOrSet 自带单飞锁，冷缓存不惊群
+],
+'session' => ['class' => \Yii2S\Swoole\Session\CoroutineSession::class, 'redis' => 'redis'],
+'queue' => [
+    'class' => \Yii2S\Swoole\Queue\CoroutineRedisQueue::class,
+    'redis' => 'redis',
+    'channel' => 'default',
+    'ttr' => 60,                  // handler 抛错后的重试延迟
+    'visibilityTimeout' => 60,    // 执行中的租约；超时未 ack 视为崩溃并计一次失败
+    'maxAttempts' => 3,           // 超过则进死信列表
+    'handler' => function (array $payload): void {
+        // 处理任务
+    },
+],
+```
+
+`request` / `response` / `session` / `user` / `view` / `errorHandler` 由框架在每个协程里重建，
+原版 `yii\web\User`、`yii\filters\auth\HttpBasicAuth` 等直接可用。Redis 的 MULTI/PIPELINE、
+DB 的事务也都原生支持（连接在协程内粘性借用）。
+
+队列取出任务后放进 reserved 集合，处理成功才删除。`handler` 抛错会按 `ttr` 延迟重试，
+超过 `maxAttempts` 进死信。进程在 `handler` 中途退出时，任务留在 reserved 里，
+超过 `visibilityTimeout` 后由下一次 `reserve()` 按失败重投。处理时间不要超过这个租约。
+
 **生产推荐 settings 清单**（按需加到 `settings` 键；每项的取舍见
 `doc/ROADMAP.md` §6.3）：
 
@@ -280,6 +309,7 @@ php yii swoole/start        # 就这么跑起来了
     // 'open_cpu_affinity' => true,   // 独立多核机可开（IO 密集可配合 cpu_affinity_ignore 留 CPU0）
 ],
 // 同时：ulimit -n（nofile）要调大——Swoole 的 max_conn 默认跟随它。
+```
 
 ### WebSocket（同端口，默认关闭）
 
@@ -321,33 +351,6 @@ final class ChatHandler implements \Yii2S\Swoole\Websocket\WebsocketHandlerInter
 
 协议细节：客户端 ping 帧自动回 pong；踢人用 `$server->disconnect($fd, 4000, ...)`；
 跨 worker 广播自己实现 transport（文档模式：Redis pub/sub，每个 worker 订阅协程）。
-
-```php
-'cache' => [
-    'class' => \Yii2S\Swoole\Cache\CoroutineRedisCache::class,
-    'redis' => 'redis',               // getOrSet 自带单飞锁，冷缓存不惊群
-],
-'session' => ['class' => \Yii2S\Swoole\Session\CoroutineSession::class, 'redis' => 'redis'],
-'queue' => [
-    'class' => \Yii2S\Swoole\Queue\CoroutineRedisQueue::class,
-    'redis' => 'redis',
-    'channel' => 'default',
-    'ttr' => 60,                  // handler 抛错后的重试延迟
-    'visibilityTimeout' => 60,    // 执行中的租约；超时未 ack 视为崩溃并计一次失败
-    'maxAttempts' => 3,           // 超过则进死信列表
-    'handler' => function (array $payload): void {
-        // 处理任务
-    },
-],
-```
-
-`request` / `response` / `session` / `user` / `view` / `errorHandler` 由框架在每个协程里重建，
-原版 `yii\web\User`、`yii\filters\auth\HttpBasicAuth` 等直接可用。Redis 的 MULTI/PIPELINE、
-DB 的事务也都原生支持（连接在协程内粘性借用）。
-
-队列取出任务后放进 reserved 集合，处理成功才删除。`handler` 抛错会按 `ttr` 延迟重试，
-超过 `maxAttempts` 进死信。进程在 `handler` 中途退出时，任务留在 reserved 里，
-超过 `visibilityTimeout` 后由下一次 `reserve()` 按失败重投。处理时间不要超过这个租约。
 
 ## 极简接口快速通道（raw 路由）
 
@@ -418,8 +421,14 @@ curl http://127.0.0.1:9501/metrics
 ```
 
 输出：请求量/状态码（`yii2s_http_requests_total`）、耗时直方图、池状态、进程内存/协程、
-系统负载（`yii2s_process_load_average`，Linux）。启用 `enableMetricsAggregation => true`
-后，指标**跨 worker 聚合**（Redis），`yii2s_process_memory_bytes` 带 `worker=` 标签。
+系统负载（`yii2s_process_load_average`，Linux），以及**内核级计数**（`yii2s_server_connection_num`、
+`abort_count`、`accept_count`、`coroutine_num` 等，来自 `Swoole\Server->stats()`，不参与
+worker 聚合）。启用 `enableMetricsAggregation => true` 后，指标**跨 worker 聚合**（Redis），
+`yii2s_process_memory_bytes` 带 `worker=` 标签。
+
+> **公网部署请配置 `adminToken`**：非空时 `/metrics`、`/__pool` 要求
+> `Authorization: Bearer <token>`（Prometheus `authorization` 原生支持），
+> 缺失/错误一律 401 且无响应体。详见 `doc/DEVELOPMENT.md` 的「观测端点访问控制」。
 
 ### `/__pool`（连接池）
 
@@ -511,6 +520,24 @@ stopwaitsecs=25                ; 必须大于 gracefulTimeout(10s)，留出排�
 > 多实例只推荐「多端口 + nginx upstream」这一种形态；真实客户端 IP（`trustedProxies`）、
 > 超时、上传大小等生产清单见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md) 部署章节。
 
+### 升级与回滚（演练验证的 runbook）
+
+`swoole/reload`（SIGUSR1）**只能更新应用层代码**（worker 启动后 require 的文件）；
+**yii2s 扩展自身代码与 server settings 在 master fork 前加载，reload 不可达**——
+框架升级/回滚必须完整重启（nginx upstream 滚动重启即零中断，已在压测中验证）：
+
+```bash
+# 应用代码变更：零中断
+php yii swoole/reload
+
+# yii2s 版本升级/回滚：滚动重启（每实例 stop + start）
+php yii swoole/stop && php yii swoole/start
+# 回滚：git checkout <tag> && php yii swoole/stop && php yii swoole/start
+```
+
+> OPcache 开启时 reload/重启加载新代码存在 ≤2s 的 opcode 窗口，零窗口方案见
+> `doc/DEVELOPMENT.md` 4.2「OPcache 与 reload」。
+
 ## 已知限制
 
 - 需要 `urlManager.enablePrettyUrl = true`（`?r=` 路由依赖 `$_GET`，协程不安全）
@@ -539,7 +566,7 @@ stopwaitsecs=25                ; 必须大于 gracefulTimeout(10s)，留出排�
 ## 开发与测试
 
 目标平台 Linux；测试可在 Linux 与 macOS（swoole-cli）上完整运行，
-全量 **238 tests / 949 assertions** 全绿。
+全量 **243 tests / 962 assertions** 全绿。
 
 ```bash
 composer test    # PHPUnit（需要本地 MySQL/Redis）
