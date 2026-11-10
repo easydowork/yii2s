@@ -180,6 +180,15 @@ return [
 php yii swoole/start        # 就这么跑起来了
 ```
 
+控制台命令 `swoole/start` 属于 **console 应用**，`config/console.php` 的
+`bootstrap` 也需要同样注册一行（只改 `web.php` 会得到
+`Unknown command: swoole/start`）：
+
+```php
+// config/console.php
+'bootstrap' => ['log', ['class' => \Yii2S\Swoole\Bootstrap::class]],
+```
+
 > 注意：服务器进程会 `require` 这个 config 文件两次（控制台入口一次、请求分发一次），
 > 配置里不要写带副作用的顶层代码。
 

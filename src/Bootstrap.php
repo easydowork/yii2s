@@ -185,7 +185,10 @@ class Bootstrap implements BootstrapInterface
                 // component for console-only applications, where the
                 // HttpServer dispatcher default will produce a meaningful
                 // error instead of a missing component.
-                $app->set($this->componentId, $this->webServerDefinition() ?? ['class' => Server\HttpServer::class]);
+                $app->set($this->componentId, $this->webServerDefinition() ?? [
+                    'class' => Server\HttpServer::class,
+                    'documentRoot' => '@app/web',
+                ]);
             }
             $app->controllerMap['swoole'] = [
                 'class' => Console\SwooleController::class,
