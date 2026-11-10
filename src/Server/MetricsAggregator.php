@@ -47,7 +47,7 @@ class MetricsAggregator
      * default connection-sticky dispatch, a scraper talks to one worker and
      * the rest would otherwise age out of the index.
      *
-     * @param array<string, array<string, int|bool>> $pools this worker's pool metrics
+     * @param array<string, \Yii2S\Swoole\Pools\ConnectionPool>|array<string, array<string, int|bool>> $pools pools or their collected metrics
      */
     public function render(RequestMetrics $metrics, array $pools): string
     {
@@ -66,7 +66,7 @@ class MetricsAggregator
     }
 
     /**
-     * @param array<string, array<string, int|bool>> $pools this worker's pool metrics
+     * @param array<string, \Yii2S\Swoole\Pools\ConnectionPool>|array<string, array<string, int|bool>> $pools pools or their collected metrics
      */
     public function publish(RequestMetrics $metrics, array $pools): void
     {

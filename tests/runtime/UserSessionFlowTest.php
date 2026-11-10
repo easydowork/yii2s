@@ -125,7 +125,9 @@ class UserSessionFlowTest extends TestCase
                     'request_uri' => '/',
                     'remote_addr' => '127.0.0.1',
                 ];
-                $resident->getRequest()->setSwooleRequest($swooleRequest);
+                $request = $resident->getRequest();
+                assert($request instanceof \Yii2S\Swoole\Runtime\CoroutineRequest);
+                $request->setSwooleRequest($swooleRequest);
 
                 $this->assertNull(
                     $resident->getUser()->getIdentity(false),

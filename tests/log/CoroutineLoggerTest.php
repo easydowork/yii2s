@@ -28,54 +28,60 @@ class CoroutineLoggerTest extends TestCase
         try {
             \Yii::setLogger(new CoroutineLogger(['flushInterval' => 0]));
             $this->runInCoroutine(function (): void {
-            $target = new class extends Target {
-                /** @var array<int, string> */
-                public array $seen = [];
+                $target = new class extends Target {
+                    /** @var array<int, string> */
+                    public array $seen = [];
 
-                public function export(): void
-                {
-                }
-
-                public function collect($messages, $final): void
-                {
-                    \Swoole\Coroutine::sleep(0.01);
-                    foreach ($messages as $message) {
-                        $this->seen[] = (string) $message[0];
+                    public function export(): void
+                    {
                     }
-                }
-            };
-            $target->exportInterval = 1;
 
-            $logger = \Yii::getLogger();
-            $logger->flushInterval = 0;
-            new Dispatcher([
-                'targets' => [$target],
-                'logger' => $logger,
-            ]);
-
-            $channel = new \Swoole\Coroutine\Channel(2);
-            foreach (['a', 'b'] as $prefix) {
-                \Swoole\Coroutine::create(function () use ($logger, $prefix, $channel): void {
-                    for ($i = 0; $i < 20; $i++) {
-                        $logger->log($prefix . $i, Logger::LEVEL_INFO, 'test');
-                        $logger->flush(true);
+                    public function collect($messages, $final): void
+                    {
+                        \Swoole\Coroutine::sleep(0.01);
+                        foreach ($messages as $message) {
+                            $this->seen[] = (string) $message[0];
+                        }
                     }
-                    $channel->push(true);
-                });
-            }
-            $channel->pop(2);
-            $channel->pop(2);
-            $logger->flush(true);
+                };
+                $target->exportInterval = 1;
 
-            $this->assertCount(40, $target->seen);
+                $logger = \Yii::getLogger();
+                $logger->flushInterval = 0;
+                new Dispatcher([
+                    'targets' => [$target],
+                    'logger' => $logger,
+                ]);
+
+                $channel = new \Swoole\Coroutine\Channel(2);
+                foreach (['a', 'b'] as $prefix) {
+                    \Swoole\Coroutine::create(function () use ($logger, $prefix, $channel): void {
+                        for ($i = 0; $i < 20; $i++) {
+                            $logger->log($prefix . $i, Logger::LEVEL_INFO, 'test');
+                            $logger->flush(true);
+                        }
+                        $channel->push(true);
+                    });
+                }
+                $channel->pop(2);
+                $channel->pop(2);
+                $logger->flush(true);
+
+                $this->assertCount(40, $target->seen);
             });
         } finally {
             $installed = \Yii::getLogger();
             if ($installed instanceof CoroutineLogger) {
+                // Teardown only: the temp logger must not keep pointing at
+                // the shared dispatcher once the previous logger is restored.
+                /** @phpstan-ignore assign.propertyType */
                 $installed->dispatcher = null;
             }
             \Yii::setLogger($previous);
             $previous->dispatcher = $previousDispatcher;
+            // The docblock says non-null, but at teardown the previous logger
+            // may legitimately have had no dispatcher at all.
+            /** @phpstan-ignore-next-line */
             if ($previousDispatcher !== null) {
                 $previousDispatcher->logger = $previous;
             }

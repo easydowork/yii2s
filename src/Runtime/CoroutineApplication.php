@@ -73,6 +73,10 @@ class CoroutineApplication extends Application
         // The parent declares a public property, so `$app->language` would
         // ignore getLanguage()/setLanguage(). Unset makes those calls go
         // through Component::__get/__set.
+        // Unset is intentional: Application::$language is a plain public
+        // property in this hierarchy (no hooks), and removing it is what
+        // routes reads/writes through the coroutine-aware overrides below.
+        /** @phpstan-ignore-next-line Intentional: routes reads/writes through the coroutine-aware overrides. */
         unset($this->language);
         parent::__construct($config);
         $this->languageOverride = true;
