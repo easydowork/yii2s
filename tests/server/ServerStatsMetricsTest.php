@@ -80,6 +80,33 @@ class ServerStatsMetricsTest extends ServerTestCase
                 $pool = $this->get('/__pool', ['Authorization' => 'Bearer test-token']);
                 $this->assertSame(200, $pool['status']);
 
+                // Path normalization: trailing slash, duplicate slashes and
+                // query variants used to BYPASS the token (the middleware
+                // trims the path, the gate did not) and disclosed metrics.
+                // Trailing slash: the middleware matches it (rtrim), so it
+                // is gated exactly like the base path - 401 without token,
+                // real metrics with token.
+                $gated = $this->get('/metrics/');
+                $this->assertSame(401, $gated['status'], 'trailing slash must stay gated');
+                $authed = $this->get('/metrics/', ['Authorization' => 'Bearer test-token']);
+                $this->assertSame(200, $authed['status']);
+                $this->assertStringContainsString('yii2s_server_connection_num', (string) $authed['body']);
+
+                // Duplicate slashes do not match the metrics middleware, so
+                // they fall through to the Yii router and must never contain
+                // metric content (with or without a token).
+                $dup = $this->get('//metrics', ['Authorization' => 'Bearer test-token']);
+                $this->assertStringNotContainsString(
+                    'yii2s_server_connection_num',
+                    (string) $dup['body'],
+                    'duplicate-slash variants must not disclose metrics'
+                );
+
+                // Query variants ARE the same endpoint (the middleware strips
+                // the query): the token gate applies - 401 without token.
+                $qgated = $this->get('/metrics?x=1');
+                $this->assertSame(401, $qgated['status'], 'query variant must stay gated');
+
                 // The token guards ONLY the observability endpoints: the app
                 // itself is untouched for unauthenticated traffic.
                 $index = $this->get('/');

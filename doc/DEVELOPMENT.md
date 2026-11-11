@@ -531,6 +531,10 @@ scrape_configs:
       - targets: ["10.0.0.5:9501"]
 ```
 
+> **作用范围**：`adminToken` 由内置的 `RequestDispatcher` 在观测端点中间件内强制执行。
+> 使用**自定义 dispatcher**（实现 `RequestDispatcherInterface` 的第三方实现）时不会
+> 自动获得此门禁——自定义实现需自行处理访问控制。
+
 外网访问（`curl -H "Authorization: Bearer <token>" https://example.com/metrics`）需
 经 nginx 反代——nginx 侧也可叠加 IP 白名单做第二道防线（纵深防御）。
 

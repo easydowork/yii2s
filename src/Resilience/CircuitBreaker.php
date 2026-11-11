@@ -147,7 +147,14 @@ class CircuitBreaker
     private function recordSuccess(): void
     {
         $this->consecutiveFailures = 0;
-        $this->state = self::STATE_CLOSED;
+        // Only the HALF_OPEN probe may close the breaker. A call that was
+        // already in flight when the breaker opened must NOT reset it: its
+        // success says nothing about the dependency having recovered, and
+        // unconditionally going CLOSED would ride over an OPEN state that
+        // concurrent callers rely on for fail-fast.
+        if ($this->state === self::STATE_HALF_OPEN) {
+            $this->state = self::STATE_CLOSED;
+        }
     }
 
     /**

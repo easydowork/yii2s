@@ -21,6 +21,9 @@ use Yii2S\Swoole\Pools\ConnectionPool;
  */
 abstract class AbstractMetricsMiddleware implements Middleware
 {
+    /** @var string|null bearer token for this endpoint; null = public (backwards compatible) */
+    public ?string $adminToken = null;
+
     /**
      * @param \Closure(): array<string, ConnectionPool> $poolCollector
      * @param bool $keepPoolErrors whether a broken pool is reported as an error
@@ -34,10 +37,35 @@ abstract class AbstractMetricsMiddleware implements Middleware
     ) {
     }
 
+    /** @var \Yii2S\Swoole\Server\RequestMetrics|null set by RequestDispatcher: 401 short-circuits report themselves here */
+    public ?\Yii2S\Swoole\Server\RequestMetrics $requestMetrics = null;
+
     public function process(Request $request, Response $response, string $path): bool
     {
         if (!$this->enabled || rtrim($path, '/') !== $this->path) {
             return false;
+        }
+
+        // Single-source access gate. The bearer token is checked HERE, with
+        // the exact same path matching as above - a second, divergent
+        // comparison elsewhere (HttpServer) drifted out of sync and let
+        // //metrics and /metrics/ disclose metrics unauthenticated. Empty
+        // token keeps the endpoint public (backwards compatible).
+        $auth = (string) ($request->header['authorization'] ?? '');
+        if ($this->adminToken !== null && $this->adminToken !== ''
+            && !hash_equals('Bearer ' . $this->adminToken, $auth)
+        ) {
+            $response->status(401);
+            $response->end();
+            // Swoole\Http\Response cannot be read back, so the rejected
+            // scrape reports its own 401 (otherwise every gate rejection
+            // would be silently counted as HTTP 200 in the metrics).
+            $this->requestMetrics?->record(
+                0.0,
+                401,
+                strtoupper((string) ($request->server['request_method'] ?? 'GET'))
+            );
+            return true; // handled: nothing is disclosed
         }
 
         return $this->render($response, $this->collectPools());

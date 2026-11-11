@@ -33,11 +33,15 @@ final class MetricsMiddleware extends AbstractMetricsMiddleware
         bool $enabled,
         string $path,
         \Closure $poolCollector,
-        private RequestMetrics $requestMetrics,
+        RequestMetrics $requestMetrics,
         private ?MetricsAggregator $aggregator = null,
         private ?\Closure $serverStatsProvider = null,
     ) {
         parent::__construct($enabled, $path, $poolCollector, false);
+        // Assign the parent's public property: a promoted private here would
+        // override AbstractMetricsMiddleware::$requestMetrics with an
+        // incompatible visibility/type.
+        $this->requestMetrics = $requestMetrics;
     }
 
     /**

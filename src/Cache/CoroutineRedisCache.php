@@ -29,10 +29,7 @@ use yii\di\Instance;
  */
 class CoroutineRedisCache extends Cache
 {
-    /**
-     * @var CoroutineRedisConnection|array|string the redis connection object or
-     * the application component ID / configuration of it.
-     */
+    /** @var CoroutineRedisConnection|string|array the connection object, or the application component ID / configuration of it (init() unwraps to the object) */
     public $redis = 'redis';
 
     /**
@@ -137,18 +134,39 @@ class CoroutineRedisCache extends Cache
 
     protected function flushValues(): bool
     {
+        // init() has unwrapped the component id/config into the connection.
+        assert($this->redis instanceof CoroutineRedisConnection);
         $prefix = $this->keyPrefix;
         if ($prefix === '') {
             return $this->redis->executeCommand('FLUSHDB') === true;
         }
 
-        // Delete only keys that belong to this cache instance.
-        $iterator = null;
+        // Delete only keys that belong to this cache instance. rawCommand()
+        // instead of executeCommand/SCAN: phpredis's scan() is a positional
+        // 4-argument signature with the cursor passed BY REFERENCE, which the
+        // command-forwarding call would break (ArgumentCountError, and the
+        // cursor could never be written back). rawCommand returns
+        // [cursor, key...].
+        $iterator = 0;
         do {
-            $keys = $this->redis->executeCommand('SCAN', [$iterator, 'MATCH', $prefix . '*', 'COUNT', 100]);
-            $iterator = (int) $keys[0];
-            if (!empty($keys[1])) {
-                $this->redis->executeCommand('DEL', $keys[1]);
+            $reply = $this->redis->rawCommand(
+                'SCAN',
+                (string) $iterator,
+                'MATCH',
+                $prefix . '*',
+                'COUNT',
+                100
+            );
+            if (!is_array($reply) || count($reply) === 0) {
+                // A failed scan (false on error) or a structurally empty
+                // reply must not be reported as a successful flush. A real
+                // SCAN reply always carries at least the cursor.
+                return false;
+            }
+            $iterator = (int) ($reply[0] ?? 0);
+            $keys = array_slice($reply, 1);
+            if ($keys !== []) {
+                $this->redis->executeCommand('DEL', $keys);
             }
         } while ($iterator !== 0);
 

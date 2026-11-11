@@ -150,4 +150,26 @@ class CoroutineRedisCacheTest extends TestCase
             $this->assertSame(1, $counter, 'the callback must run only once under a concurrent miss');
         });
     }
+
+    /**
+     * flushValues() used to throw ArgumentCountError (phpredis scan() takes
+     * at most 4 positional arguments with the cursor BY REFERENCE - both
+     * broken by the command-forwarding call) and deleted nothing. Regression:
+     * prefixed keys are flushed, keys outside the prefix stay untouched.
+     */
+    public function testFlushValuesDeletesOnlyPrefixedKeys(): void
+    {
+        $this->runInCoroutine(function (): void {
+            $cache = Yii::$app->cache;
+            $cache->set('fl:a', '1');
+            $cache->set('fl:b', '2');
+            Yii::$app->get('redis')->set('unrelated:key', 'keep-me');
+
+            $this->assertTrue($cache->flush());
+
+            $this->assertFalse($cache->get('fl:a'));
+            $this->assertFalse($cache->get('fl:b'));
+            $this->assertSame('keep-me', Yii::$app->get('redis')->get('unrelated:key'));
+        });
+    }
 }

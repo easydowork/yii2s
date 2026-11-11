@@ -334,34 +334,20 @@ class HttpServer extends Component
         $maintenanceInterval = $this->poolMaintenanceInterval;
         $broadcaster = $this->websocketBroadcaster;
         $wsHandler = $this->enableWebSocket ? $this->websocketHandler : null;
-        $metricsPath = $dispatcher instanceof RequestDispatcher ? $dispatcher->metricsPath : '/metrics';
-        $poolMetricsPath = $dispatcher instanceof RequestDispatcher ? $dispatcher->poolMetricsPath : '/__pool';
-        $adminToken = $this->adminToken;
+
+        // Observability access control lives INSIDE the metrics middleware
+        // (see AbstractMetricsMiddleware): the bearer-token gate uses the
+        // exact same path matching as the endpoint itself, so normalization
+        // drift between the two can never re-open a bypass (//metrics and
+        // trailing-slash leaks were exactly that class of bug). Forward the
+        // configured token to the first-party dispatcher only.
+        if ($dispatcher instanceof RequestDispatcher) {
+            $dispatcher->adminToken = $this->adminToken;
+        }
 
         // Every request runs inside a coroutine (Swoole enables this by
         // default); the dispatcher therefore keeps working unchanged.
-        $server->on('request', static function ($request, $response) use ($dispatcher, $server, $wsHandler, $adminToken, $metricsPath, $poolMetricsPath): void {
-            // Observability access control: `/metrics` and `/__pool` accept a
-            // bearer token via the new adminToken setting. An empty token
-            // leaves them public (backwards compatible); a configured token
-            // makes unauthenticated scrapes answer 401 with NO payload -
-            // hash_equals avoids timing side channels. Prometheus supports
-            // this natively via scrape_configs[].authorization.
-            $uri = (string) ($request->server['REQUEST_URI']
-                ?? $request->server['request_uri']
-                ?? '');
-
-            if ($adminToken !== ''
-                && ($uri === $metricsPath || $uri === $poolMetricsPath)
-            ) {
-                $auth = (string) ($request->header['authorization'] ?? '');
-                if (!hash_equals('Bearer ' . $adminToken, $auth)) {
-                    $response->status(401);
-                    $response->end();
-                    return;
-                }
-            }
-
+        $server->on('request', static function ($request, $response) use ($dispatcher, $server, $wsHandler): void {
             // Swoole 6.2 semantics (verified): when an onRequest handler is
             // registered, `Upgrade: websocket` requests are routed HERE - the
             // automatic handshake never fires, onHandShake is never called

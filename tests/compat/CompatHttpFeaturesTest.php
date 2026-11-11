@@ -26,6 +26,31 @@ class CompatHttpFeaturesTest extends CompatTestCase
     /**
      * @testdox Pretty URL rules, parameter binding and URL generation
      */
+    public function testMultiValueHeadersAreMergedNotDropped(): void
+    {
+        $this->runInCoroutine(function (): void {
+            $this->startServer('app-compat.php');
+            try {
+                $res = $this->http('GET', '/compat/multi-vary');
+                $this->assertSame(200, $res['status']);
+
+                $vary = '';
+                foreach ($res['headers'] as $name => $value) {
+                    if (strcasecmp((string) $name, 'Vary') === 0) {
+                        $vary = (string) (is_array($value) ? implode(', ', $value) : $value);
+                        break;
+                    }
+                }
+                // Swoole's header() is overwrite-semantic: without the merge
+                // in SwooleResponseSender only 'Cookie' would survive.
+                $this->assertStringContainsString('Accept-Encoding', $vary, 'first Vary value must survive');
+                $this->assertStringContainsString('Cookie', $vary, 'second Vary value must survive');
+            } finally {
+                $this->stopServer();
+            }
+        });
+    }
+
     public function testRoutingRulesAndUrlGeneration(): void
     {
         $this->withServer(function (): void {

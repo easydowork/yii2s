@@ -348,6 +348,17 @@ class CompatController extends Controller
         return ['values' => array_values($values)];
     }
 
+    public function actionMultiVary(): array
+    {
+        // Two same-name Vary values: Swoole's header() keeps only the last
+        // call, so this proves SwooleResponseSender merges repeatable
+        // headers instead of silently dropping one.
+        Yii::$app->response->headers->set('Vary', 'Accept-Encoding');
+        Yii::$app->response->headers->add('Vary', 'Cookie');
+
+        return ['vary' => true];
+    }
+
     public function actionLog(): array
     {
         Yii::info('compat-log-entry', 'compat');

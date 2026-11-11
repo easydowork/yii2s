@@ -66,9 +66,15 @@ class SwooleResponseSender
             if ($skipContentLength && strcasecmp((string) $name, 'Content-Length') === 0) {
                 continue;
             }
-            foreach ((array) $values as $value) {
-                $swooleResponse->header($name, (string) $value);
-            }
+            // Swoole's header() is overwrite-semantic: calling it per value
+            // keeps only the LAST one and silently drops Vary /
+            // Cache-Control / Link. HTTP allows comma-merging repeatable
+            // headers; only Set-Cookie must stay separate, and Yii sends
+            // those through the cookie collection below - not here.
+            $swooleResponse->header(
+                (string) $name,
+                implode(', ', array_map('strval', (array) $values))
+            );
         }
     }
 

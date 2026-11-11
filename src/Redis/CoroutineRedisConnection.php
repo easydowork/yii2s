@@ -40,6 +40,7 @@ use yii\base\Component;
  * @method int sAdd(string $key, string ...$members)
  * @method array|false sMembers(string $key)
  * @method int sRem(string $key, string ...$members)
+ * @method mixed rawCommand(string $command, ...$arguments)
  * @method int|false lPush(string $key, mixed ...$values)
  * @method int|false lLen(string $key)
  * @method \Redis multi(int $mode = 0)
@@ -274,6 +275,15 @@ class CoroutineRedisConnection extends Component implements HasConnectionPool
         $connection = CoroutineContext::get($key);
         if ($connection instanceof \Redis) {
             CoroutineContext::remove($key);
+            // A connection returned while still inside an un-executed
+            // MULTI/PIPELINE would hand its queued commands to the next
+            // borrower. phpredis exposes no transaction-state query, so
+            // disarm defensively: discard() empties the queue inside MULTI
+            // and is an ignorable error outside of one.
+            try {
+                $connection->discard();
+            } catch (\Throwable) {
+            }
             $this->getPool()->{$discard ? 'discard' : 'return'}($connection);
         }
     }

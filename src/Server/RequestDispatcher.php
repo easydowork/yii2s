@@ -17,6 +17,7 @@ use Yii2S\Swoole\Runtime\CoroutineRequest;
 use Yii2S\Swoole\Runtime\CoroutineResponse;
 use Yii2S\Swoole\Runtime\RequestStateManager;
 use Yii2S\Swoole\Runtime\SwooleResponseSender;
+use Yii2S\Swoole\Server\Middleware\AbstractMetricsMiddleware;
 use Yii2S\Swoole\Server\Middleware\MetricsMiddleware;
 use Yii2S\Swoole\Server\Middleware\Middleware;
 use Yii2S\Swoole\Server\Middleware\PoolMetricsMiddleware;
@@ -91,6 +92,15 @@ class RequestDispatcher implements RequestDispatcherInterface
      * kernel gauges/counters to its output.
      */
     public ?\Closure $serverStatsProvider = null;
+
+    /**
+     * @var string|null bearer token for the observability endpoints (set by
+     * [[HttpServer]]). Empty/null = public (backwards compatible); non-empty
+     * requires `Authorization: Bearer <token>` - enforced inside the metrics
+     * middleware, so the gate and the path matching live in ONE place and
+     * cannot drift apart (the //metrics bypass class of bugs).
+     */
+    public ?string $adminToken = null;
 
     /**
      * @var string application component id of the Redis connection used for
@@ -213,6 +223,19 @@ class RequestDispatcher implements RequestDispatcherInterface
                         : null,
                 ),
             ];
+
+        }
+
+        // The bearer-token gate lives in the SAME middleware that matches the
+        // path. Sync on EVERY getMiddleware() call: adminToken is a public
+        // property and may be assigned after the chain was first built - a
+        // build-time-only copy would silently keep the endpoints public.
+        if ($this->adminToken !== null && $this->adminToken !== '') {
+            foreach ($this->middlewareChain as $middleware) {
+                if ($middleware instanceof AbstractMetricsMiddleware) {
+                    $middleware->adminToken = $this->adminToken;
+                }
+            }
         }
 
         return $this->middlewareChain;
@@ -229,7 +252,7 @@ class RequestDispatcher implements RequestDispatcherInterface
     {
         $start = hrtime(true);
         $this->requestMetrics->beginRequest();
-        $statusCode = 200;
+        $statusCode = null;
 
         try {
             // Parse the path once for the pre-Yii handlers; when none of them
@@ -247,6 +270,13 @@ class RequestDispatcher implements RequestDispatcherInterface
                 if ($path !== null) {
                     foreach ($this->getMiddleware() as $middleware) {
                         if ($middleware->process($swooleRequest, $swooleResponse, $path)) {
+                            // Short-circuit (raw route / static file / metrics
+                            // endpoint). Swoole\Http\Response cannot read its
+                            // status back, so the middleware that knows the
+                            // status reports the request itself (see
+                            // AbstractMetricsMiddleware) and $statusCode stays
+                            // null here: the finally skips recording to avoid
+                            // double counting / fake 200s.
                             return;
                         }
                     }
@@ -284,11 +314,16 @@ class RequestDispatcher implements RequestDispatcherInterface
                 $this->stateManager->cleanup($app);
             }
         } finally {
-            $this->requestMetrics->record(
-                (hrtime(true) - $start) / 1_000_000_000.0,
-                $statusCode,
-                strtoupper((string) ($swooleRequest->server['request_method'] ?? 'GET'))
-            );
+            // $statusCode stays null on middleware short-circuits (raw/static
+            // file/metrics): those report their own status, so recording a
+            // fake 200 here would corrupt the metrics.
+            if ($statusCode !== null) {
+                $this->requestMetrics->record(
+                    (hrtime(true) - $start) / 1_000_000_000.0,
+                    $statusCode,
+                    strtoupper((string) ($swooleRequest->server['request_method'] ?? 'GET'))
+                );
+            }
         }
     }
 

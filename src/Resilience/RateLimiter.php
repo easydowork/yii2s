@@ -80,11 +80,16 @@ class RateLimiter extends ActionFilter
         }
 
         $redisKey = $this->prefix . $key;
-        $count = (int) $this->connection()->executeCommand('INCR', [$redisKey]);
-
-        if ($count === 1) {
-            $this->connection()->executeCommand('EXPIRE', [$redisKey, $windowSeconds]);
-        }
+        // Atomic fixed window via Lua: INCR and EXPIRE must not be separate
+        // round-trips - if the worker dies between them, the key is left
+        // without a TTL and the caller is rate-limited forever.
+        $count = (int) $this->connection()->executeCommand('EVAL', [
+            "local c = redis.call('INCR', KEYS[1])\n" .
+            "if c == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end\n" .
+            "return c",
+            [$redisKey, (string) $windowSeconds],
+            1,
+        ]);
 
         return $count <= $limit;
     }
