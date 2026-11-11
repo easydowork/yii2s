@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v1.2.1] - 2026-11-11
+
+### Fixed
+
+- **Swoole server settings**: unsupported-option diagnostics from
+  `Server::set()` now go to the Yii log instead of escaping as
+  `E_USER_WARNING` (which could reach responses and fail the test suite).
+- **PHP 8.5 deprecations**: `Pdo\Mysql::ATTR_MULTI_STATEMENTS` is resolved at
+  runtime and `ReflectionMethod::setAccessible()` is no longer called.
+- **WebSocket handler failures** are logged through Yii (stderr fallback when
+  no Application exists) rather than emitted as PHP warnings.
+- **CI**: `HttpServerDefaultsTest` shares one `Swoole\Http\Server` per
+  process - Linux builds reject a second instance with "server is running".
+- `HttpServer` documentation cleaned up; the `applySettings()` PHPDoc is
+  attached to the right method again.
+
+## [v1.2.0] - 2026-11-11
+
 ### Fixed
 
 - **Dev tooling no longer hard-requires `swoole-cli`**: composer scripts pick
