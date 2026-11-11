@@ -51,9 +51,9 @@
     "minimum-stability": "stable",
     "prefer-stable": true,
     "scripts": {
-        "test": "swoole-cli vendor/bin/phpunit --colors=always",
-        "static": "swoole-cli vendor/bin/phpstan analyse --memory-limit=-1",
-        "cs": "swoole-cli vendor/bin/php-cs-fixer check --diff",
-        "cs-fix": "swoole-cli vendor/bin/php-cs-fixer fix"
+        "test": "bash scripts/run-tool.sh vendor/bin/phpunit --colors=always",
+        "static": "bash scripts/run-tool.sh vendor/bin/phpstan analyse --memory-limit=-1",
+        "cs": "bash scripts/run-tool.sh vendor/bin/php-cs-fixer check --diff",
+        "cs-fix": "bash scripts/run-tool.sh vendor/bin/php-cs-fixer fix"
     }
 }

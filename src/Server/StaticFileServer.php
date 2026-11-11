@@ -164,8 +164,8 @@ class StaticFileServer
         $mtime = (int) filemtime($file);
         $method = strtoupper((string) ($swooleRequest->server['request_method'] ?? 'GET'));
 
-        // Strong validator from mtime + size (cheap, no hashing): browsers
-        // revalidate with If-None-Match and get a bodyless 304.
+        // Cheap validator from mtime + size (no hashing). Same-second,
+        // same-size edits can collide, so compare it weakly - see RFC 7232.
         $etag = '"' . dechex($mtime) . '-' . dechex($size) . '"';
 
         $swooleResponse->header('ETag', $etag);
@@ -173,12 +173,28 @@ class StaticFileServer
         $swooleResponse->header('Cache-Control', 'public, max-age=' . $this->maxAge);
         $swooleResponse->header('Accept-Ranges', 'bytes');
 
-        // Conditional request (RFC 7232 §3.2): If-None-Match matching the
-        // current ETag answers 304 with no body - before HEAD/Range handling.
+        // Conditional request (RFC 7232 §3.2): only GET/HEAD may answer 304.
+        // If-None-Match uses weak comparison (W/ prefix ignored) and `*`
+        // matches any current representation. Checked before HEAD/Range.
         $ifNoneMatch = trim((string) ($swooleRequest->header['if-none-match'] ?? ''));
-        if ($ifNoneMatch !== ''
-            && in_array($etag, array_map('trim', explode(',', $ifNoneMatch)), true)
-        ) {
+        $notModified = false;
+        if ($ifNoneMatch !== '' && ($method === 'GET' || $method === 'HEAD')) {
+            if ($ifNoneMatch === '*') {
+                $notModified = true;
+            } else {
+                foreach (explode(',', $ifNoneMatch) as $candidate) {
+                    $candidate = trim($candidate);
+                    if (str_starts_with($candidate, 'W/')) {
+                        $candidate = substr($candidate, 2);
+                    }
+                    if ($candidate === $etag) {
+                        $notModified = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if ($notModified) {
             $swooleResponse->status(304);
             HandledStatus::report(304);
             $swooleResponse->end();
@@ -208,13 +224,14 @@ class StaticFileServer
     }
 
     /**
-     * Serves a single byte range as 206 Partial Content.
+     * Serves a single byte range as 206 Partial Content, or answers 416 for
+     * a well-formed but unsatisfiable range.
      *
      * Supports `bytes=start-end`, `bytes=start-` and the suffix form
-     * `bytes=-N` (last N bytes). Anything else falls back to the full
-     * response.
+     * `bytes=-N` (last N bytes). Malformed ranges fall back to the full
+     * response (the caller sends 200 with the whole file).
      *
-     * @return bool true when the range was served
+     * @return bool true when the request was fully handled (206 or 416)
      */
     private function serveRange(Response $swooleResponse, string $file, string $header, int $size): bool
     {

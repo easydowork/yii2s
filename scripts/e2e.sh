@@ -9,7 +9,10 @@
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CLI="${CLI:-$(command -v swoole-cli || echo /usr/local/bin/swoole-cli)}"
+# Prefer swoole-cli when present (macOS dev boxes whose system PHP is too
+# old), otherwise use the system php: CI installs swoole via pecl on PHP 8.4
+# and has no swoole-cli binary. Override with CLI=... when needed.
+CLI="${CLI:-$(command -v swoole-cli || command -v php || echo php)}"
 APP_DIR="${APP_DIR:-$ROOT/example}"
 PORT="${PORT:-9601}"
 BASE="http://127.0.0.1:${PORT}"

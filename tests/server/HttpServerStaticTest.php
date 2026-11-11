@@ -113,6 +113,38 @@ class HttpServerStaticTest extends ServerTestCase
         });
     }
 
+    public function testConditionalRequestsAndUnsatisfiableRange(): void
+    {
+        $this->runInCoroutine(function (): void {
+            $this->startServer(__DIR__ . '/../data/app.php', [
+                'server' => ['documentRoot' => $this->docRoot],
+            ]);
+            try {
+                $first = $this->get('/css/app.css');
+                $etag = (string) ($first['headers']['etag'] ?? '');
+                $this->assertNotSame('', $etag, 'static files must advertise a validator');
+
+                // RFC 7232: exact match, `*` and weak comparison all revalidate.
+                foreach ([$etag, '*', 'W/' . $etag] as $candidate) {
+                    $res = $this->http('GET', '/css/app.css', ['If-None-Match' => $candidate]);
+                    $this->assertSame(304, $res['status'], "If-None-Match: {$candidate} must answer 304");
+                    $this->assertSame('', $res['body']);
+                }
+
+                // 304 is only valid for GET/HEAD - other methods keep the body.
+                $post = $this->http('POST', '/css/app.css', ['If-None-Match' => $etag], 'x=1');
+                $this->assertSame(200, $post['status'], 'POST must not be answered with 304');
+
+                // Well-formed but unsatisfiable range -> 416, not a full 200.
+                $badRange = $this->http('GET', '/css/app.css', ['Range' => 'bytes=999-']);
+                $this->assertSame(416, $badRange['status']);
+                $this->assertSame('bytes */20', (string) ($badRange['headers']['content-range'] ?? ''));
+            } finally {
+                $this->stopServer();
+            }
+        });
+    }
+
     public function testRangeRequestReturnsPartialContent(): void
     {
         $this->runInCoroutine(function (): void {

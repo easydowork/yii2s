@@ -429,11 +429,6 @@ class CoroutineRequest extends Request
     }
 
     /**
-     * Client IP. Behind a trusted reverse proxy (see [[trustedProxies]]) the
-     * right-most untrusted address of `X-Forwarded-For` wins, so rate
-     * limiting, audit logs and `yii\web\User` see the real client.
-     */
-    /**
      * Returns the peer IP from the Swoole request. The stock implementation
      * reads $_SERVER['REMOTE_ADDR'], which is never populated in a coroutine.
      */
@@ -451,6 +446,11 @@ class CoroutineRequest extends Request
         return $this->serverParam('remote_host');
     }
 
+    /**
+     * Client IP. Behind a trusted reverse proxy (see [[trustedProxies]]) the
+     * right-most untrusted address of `X-Forwarded-For` wins, so rate
+     * limiting, audit logs and `yii\web\User` see the real client.
+     */
     public function getUserIP(): ?string
     {
         $remote = $this->serverParam('remote_addr');

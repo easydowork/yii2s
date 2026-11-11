@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Dev tooling no longer hard-requires `swoole-cli`**: composer scripts pick
+  a PHP 8.4+ runtime (system `php` first, `swoole-cli` as fallback) and
+  `scripts/e2e.sh` falls back to `php`. The CI e2e job runs on the pecl-swoole
+  `php` binary and now also initialises the `yii2s_demo` database.
+- **Crontab worker integration**: the dispatcher now ticks from a reactor
+  timer plus a short-lived coroutine instead of a permanent
+  `while (true) { sleep() }` coroutine, which could trap a worker on
+  shutdown/reload ("all coroutines asleep" deadlock).
+- **Static file conditional requests**: `If-None-Match: *` and weak (`W/`)
+  validators now revalidate, and 304 is limited to GET/HEAD; `serveRange()`
+  documentation covers the 416 branch.
+- **Debug logging**: full exception stack traces are written only for 5xx,
+  so 4xx traffic no longer floods the log.
+- **`CoroutineRequest` PHPDoc** attached to the right methods; removed a
+  misattributed `getRemoteIP()` entry from the v1.1.1 changelog section.
+
 - **`CoroutineRedisCache::flushValues()` flushed nothing** (phpredis `scan()`
   ArgumentCountError via the command-forwarding call) - rewritten on
   `rawCommand()` with explicit failure handling.
@@ -56,8 +72,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for every static asset (verified on a real third-party Yii2 app behind
   nginx). With nginx serving the common suffixes, the fallback covers the
   rest (svg/ttf/woff/woff2) so new asset types need zero nginx config.
-- `CoroutineRequest::getRemoteIP()` resolution behind trusted proxies
-  (demoed in the blog example alongside the rate-limit endpoint).
 
 ### Docs
 

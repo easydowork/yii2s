@@ -124,9 +124,18 @@ jobs:
       - name: Install dependencies
         run: composer install --prefer-dist --no-interaction --no-progress
 
+      - name: Initialise the demo database
+        env:
+          YII2S_TEST_DB_PASSWORD: root
+        # The service container only creates yii2s_test; the example app uses
+        # yii2s_demo. init-db.php is idempotent (CREATE ... IF NOT EXISTS).
+        run: php example/init-db.php
+
       - name: Run e2e process lifecycle
         env:
           YII2S_TEST_DB_PASSWORD: root
+          # pecl swoole is loaded into the system php; there is no swoole-cli.
+          CLI: php
         run: bash scripts/e2e.sh
 
   smoke:

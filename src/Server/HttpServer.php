@@ -438,13 +438,18 @@ class HttpServer extends Component
             // Crontab ticks from every worker must run on worker 0 only,
             // unless the dispatcher also holds a Redis lock across instances.
             CrontabDispatcher::setWorkerId($workerId);
-            // Crontab dispatcher (optional): run() ticks forever inside its
-            // own coroutine and executes due tasks - worker 0 executes by
-            // default, the dispatcher's Redis lock covers multi-instance
+            // Crontab dispatcher (optional): a reactor timer ticks every
+            // second and runs each pass in a short-lived coroutine (the Redis
+            // lock needs one). Swoole clears timers when a worker exits, so
+            // unlike a `while (true) { sleep() }` coroutine this cannot leave
+            // the worker stuck on shutdown/reload. Worker 0 executes by
+            // default; the dispatcher's Redis lock covers multi-instance
             // deployments.
             if ($crontab !== null) {
-                \Swoole\Coroutine::create(static function () use ($crontab): void {
-                    $crontab->run();
+                \Swoole\Timer::tick(1000, static function () use ($crontab): void {
+                    \Swoole\Coroutine::create(static function () use ($crontab): void {
+                        $crontab->tick();
+                    });
                 });
             }
             // Kernel-level counters for /metrics (connection_num, abort_count,

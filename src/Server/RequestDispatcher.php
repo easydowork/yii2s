@@ -482,15 +482,14 @@ class RequestDispatcher implements RequestDispatcherInterface
         $statusCode = $this->resolveStatusCode($exception);
         try {
             $message = sprintf(
-                'Unhandled request exception: %s: %s in %s:%d%s',
+                'Unhandled request exception: %s: %s in %s:%d',
                 $exception::class,
                 $exception->getMessage(),
                 $exception->getFile(),
-                $exception->getLine(),
-                "\n" . $exception->getTraceAsString()
+                $exception->getLine()
             );
             if ($statusCode >= 500) {
-                Yii::error($message, __METHOD__);
+                Yii::error($message . "\n" . $exception->getTraceAsString(), __METHOD__);
             } else {
                 Yii::warning($message, __METHOD__);
             }

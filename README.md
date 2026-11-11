@@ -567,8 +567,11 @@ php yii swoole/stop && php yii swoole/start
 
 ## 开发与测试
 
-目标平台 Linux；测试可在 Linux 与 macOS（swoole-cli）上完整运行，
-全量 **243 tests / 962 assertions** 全绿。
+目标平台 Linux；测试可在 Linux 与 macOS 上完整运行，全量用例全绿
+（用例数随回归测试增长，以 `composer test` 的实际输出为准）。
+
+开发命令会自动选择运行时：系统 `php` ≥ 8.4（带 swoole 扩展）优先，否则回落到
+`swoole-cli`，两者都没有会直接报错；`e2e.sh` 可用 `CLI=...` 覆盖。
 
 ```bash
 composer test    # PHPUnit（需要本地 MySQL/Redis）
@@ -582,11 +585,12 @@ bash scripts/bench.sh
 
 ### CI（GitHub Actions）
 
-`.github/workflows/ci.yml` 在 push / PR 时自动跑四个 job：
+`.github/workflows/ci.yml` 在 push / PR 时自动跑五个 job：
 
 | Job | 覆盖 |
 |---|---|
-| `phpunit` | PHP 8.4–8.5 矩阵 × 真实 MySQL 8 + Redis 7 × pecl swoole 6.2.x，全量用例 |
+| `phpunit` | PHP 8.4–8.5 矩阵 × 真实 MySQL 8 + Redis 7 × pecl swoole 6.2.x，全量用例 + pcov 覆盖率文本 |
+| `e2e` | 进程级生命周期（`scripts/e2e.sh`：start / status / reload / SIGTERM 排空 / pid 清理） |
 | `smoke` | blog demo 端到端（起真实多进程服务器：MVC、错误页、REST API、session+CSRF、上传+静态、CSV 下载、队列、并发） |
 | `static` | PHPStan（`--error-format=github`，PR 上直接标注行号） |
 | `coding-standard` | php-cs-fixer |
