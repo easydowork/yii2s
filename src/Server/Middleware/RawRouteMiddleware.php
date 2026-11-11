@@ -61,6 +61,7 @@ final class RawRouteMiddleware implements Middleware
             Yii::error('Raw route ' . $method . ' ' . $path . ' failed: ' . $exception->getMessage(), __METHOD__);
             if ($response->isWritable()) {
                 $response->status(500);
+                \Yii2S\Swoole\Server\HandledStatus::report(500);
                 $response->header('Content-Type', 'text/plain; charset=UTF-8');
                 $response->end('Internal Server Error');
             }

@@ -227,14 +227,12 @@ class RequestDispatcher implements RequestDispatcherInterface
         }
 
         // The bearer-token gate lives in the SAME middleware that matches the
-        // path. Sync on EVERY getMiddleware() call: adminToken is a public
-        // property and may be assigned after the chain was first built - a
-        // build-time-only copy would silently keep the endpoints public.
-        if ($this->adminToken !== null && $this->adminToken !== '') {
-            foreach ($this->middlewareChain as $middleware) {
-                if ($middleware instanceof AbstractMetricsMiddleware) {
-                    $middleware->adminToken = $this->adminToken;
-                }
+        // path. Sync on EVERY getMiddleware() call - unconditionally, so a
+        // token cleared at runtime ('secret' -> '' / null) also CLOSES the
+        // gate instead of leaving the last value in place.
+        foreach ($this->middlewareChain as $middleware) {
+            if ($middleware instanceof AbstractMetricsMiddleware) {
+                $middleware->adminToken = $this->adminToken;
             }
         }
 
@@ -314,16 +312,19 @@ class RequestDispatcher implements RequestDispatcherInterface
                 $this->stateManager->cleanup($app);
             }
         } finally {
-            // $statusCode stays null on middleware short-circuits (raw/static
-            // file/metrics): those report their own status, so recording a
-            // fake 200 here would corrupt the metrics.
-            if ($statusCode !== null) {
-                $this->requestMetrics->record(
-                    (hrtime(true) - $start) / 1_000_000_000.0,
-                    $statusCode,
-                    strtoupper((string) ($swooleRequest->server['request_method'] ?? 'GET'))
-                );
+            // EXACTLY one record() per request (paired with beginRequest()'s
+            // in_progress increment, duration is the true wall time measured
+            // here): short-circuits report their real status through the
+            // coroutine context, the Yii path carries the response status.
+            $handled = HandledStatus::consume();
+            if ($handled !== null) {
+                $statusCode = $handled;
             }
+            $this->requestMetrics->record(
+                (hrtime(true) - $start) / 1_000_000_000.0,
+                $statusCode ?? 200,
+                strtoupper((string) ($swooleRequest->server['request_method'] ?? 'GET'))
+            );
         }
     }
 

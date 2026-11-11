@@ -60,7 +60,13 @@ class ServerStatsMetricsTest extends ServerTestCase
                     'enableMetricsEndpoint' => true,
                     'enablePoolMetricsEndpoint' => true,
                 ],
-                'server' => ['adminToken' => 'test-token'],
+                'rawRoutes' => [
+                    ['method' => 'GET', 'path' => '/boom-raw', 'type' => 'throw', 'message' => 'boom'],
+                ],
+                'server' => [
+                    'adminToken' => 'test-token',
+                    'documentRoot' => __DIR__ . '/../data/web',
+                ],
             ]);
             try {
                 // Missing token: 401 with NO payload (nothing disclosed).
@@ -106,6 +112,42 @@ class ServerStatsMetricsTest extends ServerTestCase
                 // the query): the token gate applies - 401 without token.
                 $qgated = $this->get('/metrics?x=1');
                 $this->assertSame(401, $qgated['status'], 'query variant must stay gated');
+
+                // Unified record(): a gate rejection is counted with its REAL
+                // status (it used to be recorded as HTTP 200), and every
+                // beginRequest() is paired by exactly one record() - so
+                // in_progress must stay STABLE across scrapes (a leak would
+                // grow it monotonically). The scrape itself is 1 while it is
+                // the request being served.
+                $inProgress = static function (string $body): string {
+                    return (string) (preg_match('/yii2s_http_requests_in_progress (\d+)/', $body, $m) ? $m[1] : 'missing');
+                };
+                $first = $this->get('/metrics', ['Authorization' => 'Bearer test-token']);
+                $v1 = $inProgress((string) $first['body']);
+                $this->assertNotSame('missing', $v1);
+                $this->assertStringContainsString(
+                    'yii2s_http_requests_total{method="GET",status="401"}',
+                    (string) $first['body'],
+                    'the 401 gate rejection must have its own status series'
+                );
+                $second = $this->get('/metrics', ['Authorization' => 'Bearer test-token']);
+                $this->assertSame($v1, $inProgress((string) $second['body']), 'in_progress must stay paired across requests');
+
+                // Static Range request -> 206, raw-route exception -> 500: the
+                // unified record() must give every short-circuit its own series.
+                $range = $this->get('/test.txt', ['Authorization' => 'Bearer test-token', 'Range' => 'bytes=0-4']);
+                $this->assertSame(206, $range['status']);
+                $boom = $this->get('/boom-raw', ['Authorization' => 'Bearer test-token']);
+                $this->assertSame(500, $boom['status']);
+
+                // Mixed short-circuits: in_progress stays paired across the mix,
+                // and every reported status has its own series.
+                $mixed = $this->get('/metrics', ['Authorization' => 'Bearer test-token']);
+                $mixedBody = (string) $mixed['body'];
+                foreach (['206', '401', '500'] as $status) {
+                    $this->assertStringContainsString("status=\"{$status}\"", $mixedBody, "series for {$status} must exist");
+                }
+                $this->assertSame($v1, $inProgress($mixedBody), 'in_progress must stay paired across mixed short-circuits');
 
                 // The token guards ONLY the observability endpoints: the app
                 // itself is untouched for unauthenticated traffic.

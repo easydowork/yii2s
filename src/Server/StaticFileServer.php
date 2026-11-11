@@ -230,6 +230,7 @@ class StaticFileServer
         }
 
         $swooleResponse->status(206);
+        \Yii2S\Swoole\Server\HandledStatus::report(206);
         $swooleResponse->header('Content-Range', sprintf('bytes %d-%d/%d', $offset, $offset + $length - 1, $size));
         $swooleResponse->header('Content-Length', (string) $length);
         $swooleResponse->sendfile($file, $offset, $length);

@@ -428,7 +428,9 @@ worker 聚合）。启用 `enableMetricsAggregation => true` 后，指标**跨 w
 
 > **公网部署请配置 `adminToken`**：非空时 `/metrics`、`/__pool` 要求
 > `Authorization: Bearer <token>`（Prometheus `authorization` 原生支持），
-> 缺失/错误一律 401 且无响应体。详见 `doc/DEVELOPMENT.md` 的「观测端点访问控制」。
+> 缺失/错误一律 401 且无响应体。门禁由**内置的 `RequestDispatcher`** 在观测
+> 端点中间件内强制执行；使用自定义 dispatcher 时不会自动获得此门禁（自定义
+> 实现需自行处理访问控制）。详见 `doc/DEVELOPMENT.md` 的「观测端点访问控制」。
 
 ### `/__pool`（连接池）
 
