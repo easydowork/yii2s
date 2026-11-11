@@ -32,10 +32,8 @@ use Yii2S\Swoole\Websocket\WebsocketHandlerInterface;
  * worker crash is recovered by the master, and graceful reload/shutdown are
  * provided natively by Swoole (SIGUSR1 / SIGTERM).
  *
- * The request lifecycle is otherwise identical to the coroutine server this
- * class used to wrap: every request is handled inside a coroutine, the
- * dispatcher rebuilds request-scoped state per request and pooled connections
- * stay sticky to their coroutine.
+ * Every request runs in a coroutine: the dispatcher rebuilds request-scoped
+ * state per request and pooled connections stay sticky to their coroutine.
  *
  * With [[enableWebSocket]] the internal server is a
  * [[Swoole\WebSocket\Server]] instead - a subclass of Http\Server, so plain
@@ -128,66 +126,42 @@ class HttpServer extends Component
      *  requests during a reload/shutdown (mapped to `max_wait_time`) */
     public float $gracefulTimeout = 10.0;
 
-    /** @var string|bool|null Swoole server log file (mapped to `log_file`).
-     *  null (default) resolves to a per-user runtime directory next to the
-     *  pid file, with daily rotation, so internal Swoole logs (worker
-     *  crashes, port conflicts, send failures) survive the session instead
-     *  of vanishing with stdout. Set to `false` to keep stdout-only logging
-     *  (e.g. containers collecting stdout). A `settings[log_file]` key still
-     *  wins over any of this. */
+    /** @var string|bool|null Swoole log file (`log_file`). null = per-user
+     *  runtime dir with daily rotation; false = stdout only. A
+     *  `settings[log_file]` key wins. */
     public $logFile = null;
 
-    /** @var int|null Swoole log level (one of the `SWOOLE_LOG_*` constants);
-     *  null keeps Swoole's default (INFO). A `settings[log_level]` key wins. */
+    /** @var int|null Swoole log level (`SWOOLE_LOG_*`); null keeps the
+     *  default. A `settings[log_level]` key wins. */
     public ?int $logLevel = null;
 
-    /** @var int|null coroutine runtime hook flags (see the Swoole handbook
-     *  "one-click coroutine" chapter), applied via Coroutine::set() right
-     *  before start(). Default SWOOLE_HOOK_ALL: the async-style
-     *  Swoole\Http\Server does NOT enable the runtime hook on its own
-     *  (settings['hook_flags'] is ignored on 6.2.x and Coroutine\run enables
-     *  it only for its own path), so without this, PDO/mysqli/file IO block
-     *  the worker event loop and the coroutine pool degrades to serialized
-     *  queries. Set to null to keep whatever you configured yourself via
-     *  Coroutine::set(). Baseline (PDO SLEEP(0.2), 20 concurrency, 4
-     *  workers): 92 qps with hooks vs 19 without. */
+    /** @var int|null coroutine hook flags applied via Coroutine::set()
+     *  before start(). SWOOLE_HOOK_ALL by default: the async Http\Server does
+     *  not enable hooks itself, so PDO/file IO would block the worker loop and
+     *  serialize the pools. null keeps a caller-supplied value. */
     public ?int $hookFlags = SWOOLE_HOOK_ALL;
 
-    /** @var bool whether to run the internal server as a
-     *  [[Swoole\WebSocket\Server]] (a subclass of Http\Server). Plain HTTP
-     *  keeps flowing through [[dispatcher]] on the same port; `Upgrade:
-     *  websocket` requests are bridged to [[websocketHandler]]. */
+    /** @var bool serve WebSocket upgrades on the same port. */
     public bool $enableWebSocket = false;
 
-    /** @var object|null user-implemented WebSocket lifecycle handler
-     *  ([[WebsocketHandlerInterface]]). Required when [[enableWebSocket]] is
-     *  true. Accepts an instance, a config array or a component id. Every
-     *  strategy - handshake authentication, allowed upgrade paths, message
-     *  formats, per-worker connection registries - belongs to the
-     *  implementation; the server only bridges the Swoole events. */
+    /** @var object|null [[WebsocketHandlerInterface]] implementation. Required
+     *  when [[enableWebSocket]] is true; owns handshake auth, allowed paths,
+     *  message format and connection registry. Instance, config or id. */
     public $websocketHandler = null;
 
-    /** @var object|null optional cross-worker broadcast entry point
-     *  ([[WebsocketBroadcasterInterface]]); `start()` is invoked from
-     *  `onWorkerStart` and the implementation runs its own transport
-     *  (e.g. a Redis pub/sub subscriber coroutine). Accepts an instance,
-     *  a config array or a component id. */
+    /** @var object|null [[WebsocketBroadcasterInterface]] implementation;
+     *  `start()` is called from onWorkerStart and owns its transport. */
     public $websocketBroadcaster = null;
 
-    /** @var string bearer token guarding the observability endpoints
-     *  (`/metrics`, `/__pool`). Empty (default) = the endpoints are public
-     *  (backwards compatible); non-empty = requests must carry
-     *  `Authorization: Bearer <token>` (`hash_equals` compared) or they are
-     *  answered with 401 and NO payload. Send the header from Prometheus via
-     *  `scrape_configs[].authorization`. */
+    /** @var string bearer token for `/metrics` and `/__pool`; empty (default)
+     *  leaves them public, non-empty requires `Authorization: Bearer <token>`. */
     public string $adminToken = '';
 
     /**
-     * @var CrontabDispatcher|array|null optional crontab dispatcher started in
-     * EVERY worker at onWorkerStart (`run()` ticks forever; worker 0 executes
-     * by default and the dispatcher's Redis lock covers multi-instance setups).
-     * Accepts an instance or a config array (init() unwraps with
-     * Yii::createObject).
+     * @var CrontabDispatcher|array|null optional dispatcher, ticked once a
+     * second from a reactor timer in every worker (worker 0 executes by
+     * default; a Redis lock coordinates multiple instances). Accepts an
+     * instance or a config array resolved by init().
      */
     public $crontab = null;
 
@@ -322,20 +296,14 @@ class HttpServer extends Component
         $this->isRunning = true;
         $this->writePidFile();
 
-        // Coroutine runtime hooks MUST be configured before start() (the
-        // handbook-equivalent of ini_set). See the $hookFlags property for
-        // why this is a life-saving default rather than an optimization.
+        // Hooks must be configured before start(); see $hookFlags.
         if ($this->hookFlags !== null) {
             \Swoole\Coroutine::set(['hook_flags' => $this->hookFlags]);
         }
 
-        // Explicit SWOOLE_PROCESS: a master + worker_num workers. The default
-        // on some builds is SWOOLE_BASE (single process), which neither scales
-        // across cores nor supports graceful reload().
-        // With enableWebSocket the internal server is a Swoole\WebSocket\Server
-        // - a subclass of Http\Server, so every setting, pool and lifecycle
-        // hook below keeps working unchanged; plain HTTP requests still flow
-        // through onRequest on the same port.
+        // SWOOLE_PROCESS (master + N workers) scales across cores and supports
+        // graceful reload; SWOOLE_BASE does not. WebSocket\Server extends
+        // Http\Server, so HTTP keeps flowing through the same onRequest.
         $server = $this->enableWebSocket
             ? new SwooleWebSocketServer($this->host, $this->port, SWOOLE_PROCESS)
             : new SwooleHttpServer($this->host, $this->port, SWOOLE_PROCESS);
@@ -349,12 +317,8 @@ class HttpServer extends Component
         $wsHandler = $this->enableWebSocket ? $this->websocketHandler : null;
         $crontab = $this->crontab;
 
-        // Observability access control lives INSIDE the metrics middleware
-        // (see AbstractMetricsMiddleware): the bearer-token gate uses the
-        // exact same path matching as the endpoint itself, so normalization
-        // drift between the two can never re-open a bypass (//metrics and
-        // trailing-slash leaks were exactly that class of bug). Forward the
-        // configured token to the first-party dispatcher only.
+        // The gate lives in the metrics middleware (same path matching as the
+        // endpoint); only the first-party dispatcher can receive the token.
         if ($dispatcher instanceof RequestDispatcher) {
             $dispatcher->adminToken = $this->adminToken;
         }
@@ -374,7 +338,7 @@ class HttpServer extends Component
                 try {
                     $accepted = $wsHandler->handshake($request);
                 } catch (Throwable $e) {
-                    trigger_error('websocket handshake handler failed: ' . $e->getMessage(), E_USER_WARNING);
+                    self::logWebsocketFailure('websocket handshake handler failed', $e);
                     $accepted = false;
                 }
 
@@ -410,41 +374,33 @@ class HttpServer extends Component
                 try {
                     $wsHandler->open($serv, $request, (int) $request->fd);
                 } catch (Throwable $e) {
-                    trigger_error('websocket open handler failed: ' . $e->getMessage(), E_USER_WARNING);
+                    self::logWebsocketFailure('websocket open handler failed', $e);
                 }
             });
             $server->on('message', static function ($serv, $frame) use ($wsHandler): void {
                 try {
                     $wsHandler->message($serv, $frame, (int) $frame->fd);
                 } catch (Throwable $e) {
-                    trigger_error('websocket message handler failed: ' . $e->getMessage(), E_USER_WARNING);
+                    self::logWebsocketFailure('websocket message handler failed', $e);
                 }
             });
             $server->on('close', static function ($serv, $fd) use ($wsHandler): void {
                 try {
                     $wsHandler->close($serv, (int) $fd);
                 } catch (Throwable $e) {
-                    trigger_error('websocket close handler failed: ' . $e->getMessage(), E_USER_WARNING);
+                    self::logWebsocketFailure('websocket close handler failed', $e);
                 }
             });
         }
 
-        // Each worker owns its own application/pools, so warm them up per
-        // worker, not in the master (channels cannot survive fork). The borrow
-        // loop needs a coroutine; workerStart runs outside one. The warm-up is
-        // best-effort and asynchronous: the worker serves requests immediately
-        // and pays the connect latency only if the warm-up has not finished.
+        // Each worker owns its app and pools (channels cannot survive fork),
+        // so workerStart prepares them asynchronously; requests are served
+        // immediately and only pay connect latency until warm-up finishes.
         $server->on('workerStart', static function ($workerServer, int $workerId) use ($dispatcher, $prewarm, $maintenanceInterval, $server, $broadcaster, $crontab): void {
-            // Crontab ticks from every worker must run on worker 0 only,
-            // unless the dispatcher also holds a Redis lock across instances.
+            // Only worker 0 executes crontabs unless a Redis lock coordinates
+            // instances. Timers are cleared on worker exit; the Redis lock
+            // needs a coroutine to tick in.
             CrontabDispatcher::setWorkerId($workerId);
-            // Crontab dispatcher (optional): a reactor timer ticks every
-            // second and runs each pass in a short-lived coroutine (the Redis
-            // lock needs one). Swoole clears timers when a worker exits, so
-            // unlike a `while (true) { sleep() }` coroutine this cannot leave
-            // the worker stuck on shutdown/reload. Worker 0 executes by
-            // default; the dispatcher's Redis lock covers multi-instance
-            // deployments.
             if ($crontab !== null) {
                 \Swoole\Timer::tick(1000, static function () use ($crontab): void {
                     \Swoole\Coroutine::create(static function () use ($crontab): void {
@@ -488,19 +444,14 @@ class HttpServer extends Component
             }
 
             if ($maintenanceInterval > 0) {
-                // Periodic pool upkeep (max-lifetime recycling, idle keepalive,
-                // min-idle replenishment). A reactor-level timer is used instead
-                // of a bare `while (true) { sleep() }` coroutine: Swoole clears
-                // its timers when a worker exits, so upkeep stops cleanly on
-                // shutdown/reload instead of leaving a coroutine stuck in
-                // sleep()/pop() and tripping the "all coroutines asleep -
-                // deadlock" fatal (which forced the worker to be killed).
+                // Reactor timer, not a permanent sleeping coroutine: Swoole
+                // clears timers on worker exit, so upkeep cannot trap the
+                // worker during shutdown/reload.
                 \Swoole\Timer::tick(
                     (int)($maintenanceInterval * 1000),
                     static function () use ($dispatcher): void {
-                        // Timer callbacks are not guaranteed to run inside a
-                        // coroutine; the pool channel API requires one, so run
-                        // the pass in a short-lived coroutine (it always exits).
+                        // Timer callbacks may run outside a coroutine; the
+                        // pool channel API requires one.
                         \Swoole\Coroutine::create(static function () use ($dispatcher): void {
                             $dispatcher->maintainPools();
                         });
@@ -520,6 +471,10 @@ class HttpServer extends Component
                 $exitCode === 255 => 'PHP fatal error',
                 default => 'abnormal exit',
             };
+            // onWorkerError fires in the MANAGER process (Swoole docs), with
+            // no request lifecycle: buffered Yii log targets would never
+            // flush here. E_USER_WARNING goes straight to Swoole's log_file
+            // and never reaches an HTTP response.
             trigger_error(
                 sprintf('worker crashed: worker_id=%d worker_pid=%d exit_code=%d signal=%d (%s)', $workerId, $workerPid, $exitCode, $signal, $reason),
                 E_USER_WARNING
@@ -587,8 +542,32 @@ class HttpServer extends Component
     }
 
     /**
-     * Applies the configured Swoole settings. Worker count and the graceful
-     * wait are derived from the dedicated properties; user keys win.
+     * Logs a WebSocket handler failure. These callbacks run before the Yii
+     * request lifecycle, so Yii::$app may be null and Yii::error() would drop
+     * the message; stderr is the fallback for container log collectors.
+     */
+    private static function logWebsocketFailure(string $context, Throwable $e): void
+    {
+        $message = sprintf(
+            '%s: %s in %s:%d',
+            $context,
+            $e->getMessage(),
+            $e->getFile(),
+            $e->getLine()
+        );
+
+        if (Yii::$app !== null && Yii::$app->has('log')) {
+            Yii::error($message, __METHOD__);
+
+            return;
+        }
+
+        error_log($message);
+    }
+
+    /**
+     * Applies the configured settings; worker count and graceful wait come
+     * from the dedicated properties, user keys win.
      */
     private function applySettings(SwooleHttpServer $server): void
     {
@@ -607,17 +586,9 @@ class HttpServer extends Component
             'worker_num' => $this->workerNum > 0 ? $this->workerNum : max(1, swoole_cpu_num()),
         ];
 
-        // --- request body / connection limits ---
-        // package_max_length: Swoole already rejects bodies over 2 MB with
-        // 413 (verified on 6.2.x). Pinning the value makes the limit
-        // discoverable and pairs with nginx `client_max_body_size`: keep both
-        // aligned, or nginx accepts bodies Swoole then rejects. Note the
-        // handbook limits: HTTP GET caps at 8 KB (not configurable), POST
-        // over the limit is cut off with the connection.
-        // backlog: the stock listen backlog drops SYNs during connection
-        // bursts (bench: 50+ new connections at once). 2048 is clamped by
-        // the kernel somaxconn, so raising it is safe on every platform.
-        // Overrides: settings['package_max_length'] / settings['backlog'].
+        // Keep package_max_length aligned with nginx client_max_body_size;
+        // backlog 2048 is clamped by the kernel somaxconn. Both can be
+        // overridden via settings.
         $this->settings += [
             'package_max_length' => 2 * 1024 * 1024,
             'backlog' => 2048,
@@ -633,12 +604,8 @@ class HttpServer extends Component
             ];
         }
 
-        // Swoole's own logs (worker crashes, port conflicts, send failures)
-        // go to stdout by default: lost with the session when run in the
-        // foreground, buried in the supervisor log otherwise, and unbounded
-        // in either direction. Default to a per-user log file next to the
-        // pid file with daily rotation; `false` keeps stdout-only (e.g.
-        // containers collecting stdout), and user `settings` keys win.
+        // Default Swoole logs to a rotating per-user file instead of stdout;
+        // false keeps stdout-only for containers. User settings win.
         if ($this->logFile !== false) {
             $logFile = $this->logFile
                 ?? $this->defaultRuntimeDir()
@@ -655,44 +622,40 @@ class HttpServer extends Component
             $this->settings += ['log_level' => $this->logLevel];
         }
 
-        // Microsecond timestamps: multi-worker logs interleave, so events
-        // can only be attributed during incident triage with sub-second
-        // precision. Note the official key spelling
-        // (log_date_with_microseconds). Override: settings[log_date_with_microseconds].
-        // display_errors=false: PHP notices/warnings must not leak into
-        // responses or stdout; errors still reach log_file (SWOOLE_LOG_ERROR)
-        // and Yii's log target. Override: settings['display_errors'].
+        // Microsecond timestamps disambiguate interleaved worker logs;
+        // display_errors stays off so PHP warnings never reach responses.
         $this->settings += [
             'log_date_with_microseconds' => true,
             'display_errors' => false,
         ];
 
-        $server->set($this->settings);
+        // Swoole warns about unsupported options (the supported set varies by
+        // build). Route those warnings to the log rather than the PHP error
+        // channel, where they could reach responses.
+        $rejected = [];
+        set_error_handler(static function (int $severity, string $message) use (&$rejected): bool {
+            if ($severity === E_USER_WARNING) {
+                $rejected[] = $message;
 
-        // Blind-spot defence: a settings key can be stored but never consumed
-        // by Swoole (hook_flags was ignored by 6.2.x until Runtime::set took
-        // over). Flag keys that did not survive into the applied settings so
-        // misconfigurations surface instead of failing silently.
-        $ignored = [];
-        foreach (array_keys($this->settings) as $settingsKey) {
-            if (!array_key_exists($settingsKey, $server->setting)) {
-                $ignored[] = $settingsKey;
+                return true;
             }
+
+            return false;
+        });
+        try {
+            $server->set($this->settings);
+        } finally {
+            restore_error_handler();
         }
-        if ($ignored !== []) {
-            trigger_error(
-                'settings keys not applied by Swoole (verify they are consumed): ' . implode(', ', $ignored),
-                E_USER_WARNING
-            );
+        if ($rejected !== []) {
+            Yii::warning('Swoole rejected server settings: ' . implode('; ', $rejected), __METHOD__);
         }
     }
 
     /**
-     * Development-only hot reload: a dedicated process polls watched
-     * directories and sends SIGUSR1 (Swoole's native graceful reload) to the
-     * master when a PHP file changes. Reload restarts the workers, which pick
-     * up the fresh code on the next request. The process keeps polling, so
-     * later edits reload again without restarting the server.
+     * Development-only hot reload: a watchdog process polls watched PHP files
+     * and sends SIGUSR1 to the master on change; reloaded workers pick up the
+     * new code without a restart.
      */
     private function startWatchdog(): void
     {

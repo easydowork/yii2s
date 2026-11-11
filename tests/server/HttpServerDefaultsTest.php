@@ -30,11 +30,16 @@ class HttpServerDefaultsTest extends TestCase
         ], $config));
     }
 
+    private ?\Swoole\Http\Server $swooleServer = null;
+
     private function apply(HttpServer $server): void
     {
-        $ref = new \ReflectionMethod($server, 'applySettings');
-        $ref->setAccessible(true);
-        $ref->invoke($server, new \Swoole\Http\Server('127.0.0.1', 0, SWOOLE_PROCESS));
+        // setAccessible() has been a no-op since PHP 8.1 and is deprecated in
+        // 8.5. Reuse ONE unstarted Swoole server per test case: constructing
+        // many of them in the same process is unstable on some Linux/PHP
+        // builds, and applySettings() only needs a server to call set() on.
+        $this->swooleServer ??= new \Swoole\Http\Server('127.0.0.1', 0, SWOOLE_PROCESS);
+        (new \ReflectionMethod($server, 'applySettings'))->invoke($server, $this->swooleServer);
     }
 
     private function runtimeDir(): string

@@ -123,13 +123,19 @@ abstract class DatabaseTestCase extends TestCase
         $serverPdo = null;
 
         if ($reset && $fixture !== null) {
+            // PHP 8.5 moved the driver constants to Pdo\Mysql and deprecated
+            // PDO::MYSQL_ATTR_*. Resolve at runtime so the suite stays quiet
+            // on both 8.4 and 8.5 without raising the minimum PHP version.
+            $multiStatements = class_exists('Pdo\\Mysql')
+                ? (int) constant('Pdo\\Mysql::ATTR_MULTI_STATEMENTS')
+                : (int) constant('PDO::MYSQL_ATTR_MULTI_STATEMENTS');
             $pdo = new \PDO(
                 $config['dsn'],
                 $config['username'],
                 $config['password'],
                 [
                     \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
-                    \PDO::MYSQL_ATTR_MULTI_STATEMENTS => true,
+                    $multiStatements => true,
                 ]
             );
             $pdo->exec((string) file_get_contents($fixture));
