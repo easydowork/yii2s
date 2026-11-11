@@ -30,16 +30,22 @@ class HttpServerDefaultsTest extends TestCase
         ], $config));
     }
 
-    private ?\Swoole\Http\Server $swooleServer = null;
+    /** Swoole allows only one Server object per process on Linux builds. */
+    private static ?\Swoole\Http\Server $swooleServer = null;
+
+    public static function tearDownAfterClass(): void
+    {
+        self::$swooleServer = null;
+        parent::tearDownAfterClass();
+    }
 
     private function apply(HttpServer $server): void
     {
-        // setAccessible() has been a no-op since PHP 8.1 and is deprecated in
-        // 8.5. Reuse ONE unstarted Swoole server per test case: constructing
-        // many of them in the same process is unstable on some Linux/PHP
-        // builds, and applySettings() only needs a server to call set() on.
-        $this->swooleServer ??= new \Swoole\Http\Server('127.0.0.1', 0, SWOOLE_PROCESS);
-        (new \ReflectionMethod($server, 'applySettings'))->invoke($server, $this->swooleServer);
+        // PHPUnit builds a fresh test object per method, so this must be
+        // static: a second `new Server()` throws "server is running" on
+        // Linux. applySettings() only needs one object to call set() on.
+        self::$swooleServer ??= new \Swoole\Http\Server('127.0.0.1', 0, SWOOLE_PROCESS);
+        (new \ReflectionMethod($server, 'applySettings'))->invoke($server, self::$swooleServer);
     }
 
     private function runtimeDir(): string
