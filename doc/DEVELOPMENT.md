@@ -960,7 +960,7 @@ public function getPool(): ConnectionPool
 | C9 | 数据库事务在协程下正常（含嵌套 savepoint） | `tests/db/`；`curl /demo/transaction` |
 | C10 | 队列：延迟投递、失败重试、超限死信 | `tests/queue/CoroutineRedisQueueTest.php` |
 | C11 | 队列空时 run(N) 立即返回；`queue/serve` 空队列不崩 | `tests/queue/`（含协程外场景） |
-| C12 | 压测基准 21769 QPS，池零泄漏 | `scripts/bench.sh` + `/__pool`（total_timeouts=0, active=0） |
+| C12 | 压测基准 21769 QPS（50 并发，macOS + swoole-cli；口径与机器相关，见压测章节），池零泄漏 | `scripts/bench.sh` + `/__pool`（total_timeouts=0, active=0） |
 | C13 | Cookie 签名验证（入站验证 + 出站签名） | `tests/runtime/CoroutineRequestTest.php`（篡改丢弃）+ `HttpServerCsrfTest`（往返） |
 | C14 | 上传三种形状归一化 + `$_FILES` 官方 API 通路 | `tests/server/HttpServerFormTest.php`（sha1 字节级验证） |
 | C15 | 升级后 Yii2 功能点端到端可用（路由/请求/响应格式/重定向/Cookie/CSRF/会话/登录/Flash/上传/下载/错误/常驻服务） | `tests/compat/CompatHttpFeaturesTest.php`（真实 socket，见 5.4 矩阵） |

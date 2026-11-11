@@ -161,11 +161,30 @@ class StaticFileServer
         }
 
         $size = (int) filesize($file);
+        $mtime = (int) filemtime($file);
         $method = strtoupper((string) ($swooleRequest->server['request_method'] ?? 'GET'));
 
+        // Strong validator from mtime + size (cheap, no hashing): browsers
+        // revalidate with If-None-Match and get a bodyless 304.
+        $etag = '"' . dechex($mtime) . '-' . dechex($size) . '"';
+
+        $swooleResponse->header('ETag', $etag);
         $swooleResponse->header('Content-Type', self::DEFAULT_MIME_TYPES[$extension] ?? 'application/octet-stream');
         $swooleResponse->header('Cache-Control', 'public, max-age=' . $this->maxAge);
         $swooleResponse->header('Accept-Ranges', 'bytes');
+
+        // Conditional request (RFC 7232 §3.2): If-None-Match matching the
+        // current ETag answers 304 with no body - before HEAD/Range handling.
+        $ifNoneMatch = trim((string) ($swooleRequest->header['if-none-match'] ?? ''));
+        if ($ifNoneMatch !== ''
+            && in_array($etag, array_map('trim', explode(',', $ifNoneMatch)), true)
+        ) {
+            $swooleResponse->status(304);
+            HandledStatus::report(304);
+            $swooleResponse->end();
+
+            return true;
+        }
 
         // HEAD: headers only, no body (sendfile() would emit the whole file).
         if ($method === 'HEAD') {
@@ -219,7 +238,15 @@ class StaticFileServer
             $offset = (int) $m[1];
             $end = $m[2] === '' ? $size - 1 : (int) $m[2];
             if ($offset > $end || $offset >= $size) {
-                return false; // unsatisfiable: fall back to the full response
+                // Unsatisfiable (RFC 7233 §4.4): a well-formed range that
+                // starts beyond the file answers 416 with the current size -
+                // silently falling back to a full 200 hides the mismatch.
+                $swooleResponse->status(416);
+                HandledStatus::report(416);
+                $swooleResponse->header('Content-Range', 'bytes */' . $size);
+                $swooleResponse->end();
+
+                return true;
             }
             $end = min($end, $size - 1);
             $length = $end - $offset + 1;

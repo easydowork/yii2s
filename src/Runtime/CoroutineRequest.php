@@ -433,6 +433,24 @@ class CoroutineRequest extends Request
      * right-most untrusted address of `X-Forwarded-For` wins, so rate
      * limiting, audit logs and `yii\web\User` see the real client.
      */
+    /**
+     * Returns the peer IP from the Swoole request. The stock implementation
+     * reads $_SERVER['REMOTE_ADDR'], which is never populated in a coroutine.
+     */
+    public function getRemoteIP(): ?string
+    {
+        return $this->serverParam('remote_addr');
+    }
+
+    /**
+     * Returns the peer host from the Swoole request (usually null - reverse
+     * DNS lookup is not performed; see the stock getRemoteHost()).
+     */
+    public function getRemoteHost(): ?string
+    {
+        return $this->serverParam('remote_host');
+    }
+
     public function getUserIP(): ?string
     {
         $remote = $this->serverParam('remote_addr');

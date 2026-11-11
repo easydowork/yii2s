@@ -49,7 +49,7 @@ jobs:
           # pcntl/posix are required by the multi-process Swoole\Http\Server
           # (SWOOLE_PROCESS) used by the integration tests.
           extensions: pdo_mysql, redis, mbstring, pcntl, posix
-          coverage: none
+          coverage: pcov
 
       - name: Install Swoole (pecl)
         # Self-managed pecl install instead of setup-php's "swoole" extension
@@ -69,7 +69,65 @@ jobs:
         run: composer install --prefer-dist --no-interaction --no-progress
 
       - name: Run tests
-        run: vendor/bin/phpunit --no-coverage --verbose
+        run: vendor/bin/phpunit --coverage-text --verbose
+
+  e2e:
+    name: e2e process lifecycle
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: yii2s_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          # pcntl/posix are required by the multi-process Swoole\Http\Server
+          # driven by the e2e script (start/status/reload/SIGTERM).
+          extensions: pdo_mysql, redis, mbstring, pcntl, posix
+          coverage: none
+
+      - name: Install Swoole (pecl)
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y libbrotli-dev libssl-dev zlib1g-dev pkg-config
+          yes '' | sudo pecl install swoole-6.2.4
+          echo "extension=swoole.so" | sudo tee /etc/php/8.4/mods-available/swoole.ini
+          sudo phpenmod -v 8.4 swoole
+          php -m | grep -i swoole
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Run e2e process lifecycle
+        env:
+          YII2S_TEST_DB_PASSWORD: root
+        run: bash scripts/e2e.sh
 
   smoke:
     name: Blog demo smoke (end-to-end)

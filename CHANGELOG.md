@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`CoroutineRedisCache::flushValues()` flushed nothing** (phpredis `scan()`
+  ArgumentCountError via the command-forwarding call) - rewritten on
+  `rawCommand()` with explicit failure handling.
+- **`adminToken` bearer gate bypass**: the gate lived in HttpServer with
+  different path semantics than the middleware, so `/metrics/`, `//metrics`
+  and `/__pool/` disclosed metrics unauthenticated. The gate now lives inside
+  the metrics middleware with the same path matching; 401 rejections are
+  recorded with their real status instead of a fake 200.
+- **Multi-value response headers** (Vary, Cache-Control, ...) were silently
+  overwritten by Swoole's `header()` - SwooleResponseSender now comma-merges
+  repeatable headers.
+- **RateLimiter atomicity**: INCR + EXPIRE moved into one Lua script (a worker
+  death between the two rate-limited the caller forever).
+- **CircuitBreaker state machine**: only the HALF_OPEN probe closes the
+  breaker; in-flight calls no longer ride over an OPEN state.
+- **Middleware short-circuits no longer record a fake HTTP 200**: each
+  short-circuit reports its real status through `Server\HandledStatus` and
+  the dispatcher records exactly once per request.
+- **CoroutineRedisConnection**: releasing a connection disarms un-executed
+  MULTI/PIPELINE queues with `discard()`.
+- **Static files**: unsatisfiable Range requests answer 416 with
+  `Content-Range: bytes */size` (previously a silent full 200), conditional
+  requests get ETag / 304 support.
+- **YII_DEBUG stack traces** are written to the log only, never into the
+  error response body.
+- `CoroutineRequest::getRemoteIP()/getRemoteHost()` implemented (stock
+  versions read the never-populated `$_SERVER`).
+
+### Added
+
+- **`Server\HandledStatus`**: single source for short-circuit status
+  reporting (report()/consume() with the context key defined once).
+- **crontab integration point**: `HttpServer::$crontab` (instance or config
+  array) starts the dispatcher in every worker at `onWorkerStart`.
+- Regression coverage: flushValues, the token boundary matrix (trailing
+  slash / duplicate slashes / query variants), multi-value header merging,
+  and the short-circuit status series (206/401/500).
+
+## [v1.1.1] - 2026-11-10
+
+### Fixed
+
+- **Fallback `swooleHttpServer` serves `documentRoot`** (`@app/web`):
+  one-line integrations without their own server block kept answering 404
+  for every static asset (verified on a real third-party Yii2 app behind
+  nginx). With nginx serving the common suffixes, the fallback covers the
+  rest (svg/ttf/woff/woff2) so new asset types need zero nginx config.
+- `CoroutineRequest::getRemoteIP()` resolution behind trusted proxies
+  (demoed in the blog example alongside the rate-limit endpoint).
+
+### Docs
+
+- README: console.php bootstrap registration for `swoole/start`, the
+  `adminToken` custom-dispatcher scope, and a full README review (rendering
+  fix, v1.1.x feature coverage, upgrade/rollback runbook).
+
+## [v1.1.0] - 2026-11-10
+
 ### Removed
 
 - **Same-port `SO_REUSEPORT` multi-instance**: the `enableReusePort` option is
@@ -186,6 +246,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   uploads, downloads, error handling, resident services, concurrency
   isolation) driven through a real Swoole server; the feature matrix lives in
   `doc/DEVELOPMENT.md` 5.4.
+
+## [v1.0.0] - 2026-11-07
 
 ### Added
 

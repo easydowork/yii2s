@@ -482,11 +482,12 @@ class RequestDispatcher implements RequestDispatcherInterface
         $statusCode = $this->resolveStatusCode($exception);
         try {
             $message = sprintf(
-                'Unhandled request exception: %s: %s in %s:%d',
+                'Unhandled request exception: %s: %s in %s:%d%s',
                 $exception::class,
                 $exception->getMessage(),
                 $exception->getFile(),
-                $exception->getLine()
+                $exception->getLine(),
+                "\n" . $exception->getTraceAsString()
             );
             if ($statusCode >= 500) {
                 Yii::error($message, __METHOD__);
@@ -532,10 +533,13 @@ class RequestDispatcher implements RequestDispatcherInterface
                 $swooleResponse->status($status);
                 $swooleResponse->header('Content-Type', 'text/plain; charset=UTF-8');
 
+                // Debug builds keep the message and coroutine id in the
+                // response, but the full stack trace goes to the LOG only:
+                // a DEBUG flag accidentally left on in production must not
+                // hand every visitor the server internals.
                 if (YII_DEBUG) {
-                    $body = 'Error: ' . $exception->getMessage() . "\n\n"
-                        . 'Coroutine ID: ' . \Swoole\Coroutine::getCid() . "\n\n"
-                        . $exception->getTraceAsString();
+                    $body = 'Error: ' . $exception->getMessage() . "\n"
+                        . 'Coroutine ID: ' . \Swoole\Coroutine::getCid();
                 } else {
                     $body = 'Internal Server Error';
                 }

@@ -182,6 +182,15 @@ class HttpServer extends Component
      *  `scrape_configs[].authorization`. */
     public string $adminToken = '';
 
+    /**
+     * @var CrontabDispatcher|array|null optional crontab dispatcher started in
+     * EVERY worker at onWorkerStart (`run()` ticks forever; worker 0 executes
+     * by default and the dispatcher's Redis lock covers multi-instance setups).
+     * Accepts an instance or a config array (init() unwraps with
+     * Yii::createObject).
+     */
+    public $crontab = null;
+
     private ?SwooleHttpServer $server = null;
 
     private bool $isRunning = false;
@@ -193,6 +202,10 @@ class HttpServer extends Component
     public function init(): void
     {
         parent::init();
+
+        if (is_array($this->crontab)) {
+            $this->crontab = Yii::createObject($this->crontab);
+        }
 
         if (empty($this->dispatcher)) {
             // Sensible default for web applications: the standard config
@@ -334,6 +347,7 @@ class HttpServer extends Component
         $maintenanceInterval = $this->poolMaintenanceInterval;
         $broadcaster = $this->websocketBroadcaster;
         $wsHandler = $this->enableWebSocket ? $this->websocketHandler : null;
+        $crontab = $this->crontab;
 
         // Observability access control lives INSIDE the metrics middleware
         // (see AbstractMetricsMiddleware): the bearer-token gate uses the
@@ -420,10 +434,19 @@ class HttpServer extends Component
         // loop needs a coroutine; workerStart runs outside one. The warm-up is
         // best-effort and asynchronous: the worker serves requests immediately
         // and pays the connect latency only if the warm-up has not finished.
-        $server->on('workerStart', static function ($workerServer, int $workerId) use ($dispatcher, $prewarm, $maintenanceInterval, $server, $broadcaster): void {
+        $server->on('workerStart', static function ($workerServer, int $workerId) use ($dispatcher, $prewarm, $maintenanceInterval, $server, $broadcaster, $crontab): void {
             // Crontab ticks from every worker must run on worker 0 only,
             // unless the dispatcher also holds a Redis lock across instances.
             CrontabDispatcher::setWorkerId($workerId);
+            // Crontab dispatcher (optional): run() ticks forever inside its
+            // own coroutine and executes due tasks - worker 0 executes by
+            // default, the dispatcher's Redis lock covers multi-instance
+            // deployments.
+            if ($crontab !== null) {
+                \Swoole\Coroutine::create(static function () use ($crontab): void {
+                    $crontab->run();
+                });
+            }
             // Kernel-level counters for /metrics (connection_num, abort_count,
             // ...). stats() reads the shared server state, so every worker sees
             // the same global numbers - the metrics middleware therefore
